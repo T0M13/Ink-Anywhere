@@ -1,5 +1,9 @@
 # Ink Anywhere — custom PNG tattoos for Paralives
 
+<p align="center">
+  <img src="Screenshots/inkanywhere_banner.png" alt="Ink Anywhere - custom PNG tattoos for Paralives">
+</p>
+
 Import **any PNG** (transparent background) as a real, placeable, **full-color**
 tattoo in Paralives. Drop images in a folder — or add them live in-game with a
 **"+" tile** in the tattoo catalog that opens a file picker. They behave like
@@ -21,6 +25,18 @@ the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nex
 - Tidy auto-generated catalog thumbnails (image fit + centered on a light background).
 - Wider decal scaling than vanilla (0.05–6 instead of 0.25–1.5).
 - Stable: invalid images are skipped, and deleting a PNG cleanly removes its tattoo.
+
+## Screenshots
+
+<p align="center">
+  <img src="Screenshots/inkanywhere_screenshot_4.png" alt="Ink Anywhere tattoo placement" width="49%">
+  <img src="Screenshots/inkanywhere_screenshot_6.png" alt="Ink Anywhere tattoo catalog and file picker" width="49%">
+</p>
+
+<p align="center">
+  <img src="Screenshots/inkanywhere_screenshot_2.png" alt="Custom tattoo in Paramaker" width="49%">
+  <img src="Screenshots/inkanywhere_screenshot_3.png" alt="Custom PNG tattoo detail" width="49%">
+</p>
 
 ## Install
 
