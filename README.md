@@ -8,6 +8,11 @@ built-in tattoos: move / scale / rotate / flip with the game's own decal tools.
 A [BepInEx](https://github.com/BepInEx/BepInEx) (Unity / C#) script mod. Not for
 the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nexus.
 
+<p align="center">
+  <a href="https://ko-fi.com/t0m13"><img src="https://i.imgur.com/1xL45if.png" alt="Support on Ko-fi"></a>
+  <a href="https://www.patreon.com/c/T0M1"><img src="https://i.imgur.com/RW3Vg8M.png" alt="Support on Patreon"></a>
+</p>
+
 ## Features
 
 - Import any PNG as a tattoo — full color, transparency preserved.
