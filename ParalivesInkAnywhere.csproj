@@ -21,7 +21,16 @@
     <PluginsDir>C:\Program Files (x86)\Steam\steamapps\common\Paralives\BepInEx\plugins\InkAnywhere</PluginsDir>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <GameRoot>C:\Program Files (x86)\Steam\steamapps\common\Paralives</GameRoot>
+  </PropertyGroup>
+
   <ItemGroup>
+    <!-- Use the Harmony that BepInEx already ships + loads (no MonoMod.Backports dep). -->
+    <Reference Include="0Harmony">
+      <HintPath>$(GameRoot)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Paralives">
       <HintPath>$(GameManaged)\Paralives.dll</HintPath>
       <Private>false</Private>

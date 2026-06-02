@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Logging;
+using HarmonyLib;
 using Setting;
 using UnityEngine;
 
@@ -37,6 +39,20 @@ namespace InkAnywhere
                 go.hideFlags = HideFlags.HideAndDontSave;
                 go.AddComponent<Runner>();
                 Log.LogInfo("Runner GameObject created.");
+
+                // Harmony lets us intercept clicks on our in-grid "+" tile. If it fails
+                // to load, the mod still works and falls back to a floating button.
+                try
+                {
+                    new Harmony(Guid).PatchAll();
+                    Runner.HarmonyOk = true;
+                    Log.LogInfo("Harmony patched OK (in-grid + tile enabled).");
+                }
+                catch (Exception he)
+                {
+                    Runner.HarmonyOk = false;
+                    Log.LogWarning("Harmony unavailable, using fallback button: " + he.Message);
+                }
             }
             catch (Exception e)
             {
@@ -50,10 +66,26 @@ namespace InkAnywhere
     {
         private static ManualLogSource Log => Plugin.Log;
 
+        public static Runner Instance;
+        public static bool HarmonyOk;
+
+        // Fixed GUID for our special "+ Add tattoo" catalog tile.
+        public const ulong AddButtonGuid = 0xADDA7700ADDA7700UL;
+
+        private void Awake() => Instance = this;
+
         private bool _updateSeen;
         private bool _dumped;
         private float _nextCheck;
-        private string _status = "starting...";
+
+        // Results for the status panel.
+        private int _loaded;
+        private readonly List<string> _failures = new List<string>();
+        private bool _panelOpen = true;
+
+        // True while the Paramaker tattoo (decal) section is open — shows the + button.
+        private bool _inTattooSection;
+        private float _nextSectionCheck;
 
         // Watchdog: the game keeps unloading our texture and its own reload returns
         // null, which NREs the skin compositor. We track each texture GUID -> source
@@ -86,6 +118,15 @@ namespace InkAnywhere
             if (_texPaths.Count > 0)
                 foreach (var guid in _texPaths.Keys)
                     EnsureTexture(guid);
+
+            // Detect whether we're in the tattoo section (a few times a second).
+            if (Time.unscaledTime >= _nextSectionCheck)
+            {
+                _nextSectionCheck = Time.unscaledTime + 0.25f;
+                _inTattooSection = false;
+                foreach (var l in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
+                    if (l != null && l.isActiveAndEnabled && l.UIDecalPositions != null) { _inTattooSection = true; break; }
+            }
         }
 
         // Reload our PNG into the asset whenever its texture is missing/destroyed.
@@ -113,81 +154,179 @@ namespace InkAnywhere
             asset.IsLoaded = true;
         }
 
+        // Flip to true to bring back the in-game debug panel (status + failures + buttons).
+        private static readonly bool ShowDebugUI = false;
+
         private void OnGUI()
         {
-            GUI.color = Color.white;
-            GUI.Box(new Rect(10, 10, 360, 126), "Ink Anywhere — mod is running");
-            GUI.Label(new Rect(18, 36, 344, 22), _status);
-
-            if (GUI.Button(new Rect(18, 62, 170, 30), "Scan + Dump"))
+            // Fallback floating button only if the in-grid "+" tile isn't available.
+            if (_inTattooSection && !HarmonyOk)
             {
-                Scan();
-                DumpTattoos();
+                const float bw = 200f, bh = 36f;
+                var style = new GUIStyle(GUI.skin.button) { fontSize = 15 };
+                if (GUI.Button(new Rect(Screen.width - bw - 24, 24, bw, bh), "＋  Add Tattoo (PNG)", style))
+                    PickAndAddPng();
             }
-            if (GUI.Button(new Rect(196, 62, 166, 30), "Open folder"))
-                Application.OpenURL("file://" + Plugin.TattooFolder);
 
-            if (GUI.Button(new Rect(18, 96, 344, 30), "Inject PNGs as tattoos"))
+            if (!ShowDebugUI) return;
+
+            // Collapsed: a small button in the corner to reopen the panel.
+            if (!_panelOpen)
+            {
+                if (GUI.Button(new Rect(10, 10, 130, 26), "Ink Anywhere"))
+                    _panelOpen = true;
+                return;
+            }
+
+            bool hasErrors = _failures.Count > 0;
+            float h = 92 + (hasErrors ? Mathf.Min(_failures.Count, 6) * 20 + 24 : 0);
+            GUI.Box(new Rect(10, 10, 380, h), "Ink Anywhere");
+
+            GUI.Label(new Rect(20, 34, 360, 22),
+                hasErrors
+                    ? $"{_loaded} tattoo(s) loaded — {_failures.Count} could not be added:"
+                    : $"{_loaded} custom tattoo(s) loaded.");
+
+            float y = 56;
+            if (hasErrors)
+            {
+                var prev = GUI.color;
+                GUI.color = new Color(1f, 0.6f, 0.6f);
+                foreach (var f in _failures.Take(6))
+                {
+                    GUI.Label(new Rect(28, y, 352, 20), "• " + f);
+                    y += 20;
+                }
+                if (_failures.Count > 6)
+                {
+                    GUI.Label(new Rect(28, y, 352, 20), $"…and {_failures.Count - 6} more");
+                    y += 20;
+                }
+                GUI.color = prev;
+                y += 4;
+            }
+
+            if (GUI.Button(new Rect(20, y, 120, 28), "Refresh"))
                 Inject();
+            if (GUI.Button(new Rect(148, y, 130, 28), "Open folder"))
+                Application.OpenURL("file://" + Plugin.TattooFolder);
+            if (GUI.Button(new Rect(286, y, 84, 28), "Hide"))
+                _panelOpen = false;
         }
 
-        // ---- Phase 1: turn each PNG into a real tattoo in the catalog ----
+        // ---- Turn every PNG in the folder into a tattoo in the catalog ----
         private void Inject()
         {
             try
             {
                 var eq = Settings.Get<Equipment>();
-                if (eq?.EquipmentItems == null) { _status = "equipment not loaded"; return; }
+                if (eq?.EquipmentItems == null) return;
 
-                // Template = an existing tattoo we clone (reuses its tags/swatch/decal sections/shader).
+                // Template = an existing tattoo we clone (reuses its tags/swatch/decal sections).
                 var template = eq.EquipmentItems.FirstOrDefault(e => e != null && e.IsDecal);
-                if (template == null) { _status = "no template tattoo found"; return; }
-                Log.LogInfo($"[inject] using template '{template.DisplayName}' model={template.CharacterModelGUID}");
+                if (template == null) return;
 
-                var pngs = Directory.GetFiles(Plugin.TattooFolder, "*.png");
-                int added = 0;
-                foreach (var path in pngs)
+                // Allow much smaller/larger tattoo scaling than the default 0.25–1.5.
+                var decals = Settings.Get<Decals>();
+                if (decals != null) { decals.DecalScaleMin = 0.05f; decals.DecalScaleMax = 6f; }
+
+                // Drop our "+" tile so we can re-add it last after the real tattoos.
+                eq.EquipmentItems = eq.EquipmentItems.Where(e => e == null || e.GUID != AddButtonGuid).ToArray();
+
+                var iconDir = Path.Combine(Plugin.TattooFolder, "_icons");
+                Directory.CreateDirectory(iconDir);
+
+                _failures.Clear();
+                _loaded = 0;
+                int newlyAdded = 0;
+
+                foreach (var path in Directory.GetFiles(Plugin.TattooFolder, "*.png"))
                 {
                     string name = Path.GetFileNameWithoutExtension(path);
-                    ulong texGuid = Hash(name + "|tex");
-                    ulong equipGuid = Hash(name + "|equip");
-
-                    if (eq.EquipmentItems.Any(e => e != null && e.GUID == equipGuid)) { continue; } // already added
-
-                    // 1) Register the PNG as a texture asset, then hand it to the
-                    //    watchdog which loads + keeps it alive (the game's own reload
-                    //    path returns null and NREs the compositor).
-                    if (AssetManager.Instance.GetAssetOfType<AssetTexture>(texGuid) == null)
+                    try
                     {
-                        var asset = AssetManager.Instance.RegisterAsset(path, texGuid, false, 0uL) as AssetTexture;
-                        if (asset == null) { Log.LogWarning("[inject] not a texture asset: " + name); continue; }
-                        asset.IsClampTextureWrapMode = true;
-                    }
-                    _texPaths[texGuid] = path;
-                    EnsureTexture(texGuid);
-                    Log.LogInfo($"[inject] texture '{name}' ready (guid={texGuid})");
+                        // Validate the image actually decodes before doing anything.
+                        var probe = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+                        bool ok = probe.LoadImage(File.ReadAllBytes(path)) && probe.width > 2 && probe.height > 2;
+                        UnityEngine.Object.Destroy(probe);
+                        if (!ok) { _failures.Add(name + " — not a valid image"); continue; }
 
-                    // 2) Clone the template tattoo and repoint it at our texture, full-color.
-                    var item = ShallowClone(template);
-                    item.GUID = equipGuid;
-                    item.DisplayName = "Ink: " + name;
-                    item.VisibleInCatalog = true;
-                    item.TextureIconGUID = texGuid;
-                    if (template.Textures != null && template.Textures.Length > 0)
+                        ulong texGuid = Hash(name + "|tex");
+                        ulong equipGuid = Hash(name + "|equip");
+                        ulong iconGuid = Hash(name + "|icon");
+
+                        if (eq.EquipmentItems.Any(e => e != null && e.GUID == equipGuid)) { _loaded++; continue; }
+
+                        // Texture (kept alive by the watchdog).
+                        if (AssetManager.Instance.GetAssetOfType<AssetTexture>(texGuid) == null)
+                        {
+                            var asset = AssetManager.Instance.RegisterAsset(path, texGuid, false, 0uL) as AssetTexture;
+                            if (asset == null) { _failures.Add(name + " — texture register failed"); continue; }
+                            asset.IsClampTextureWrapMode = true;
+                        }
+                        _texPaths[texGuid] = path;
+                        EnsureTexture(texGuid);
+
+                        // Tidy square thumbnail (regenerated each run so it self-heals).
+                        string iconPath = Path.Combine(iconDir, name + ".png");
+                        MakeSquareIcon(path, iconPath);
+                        if (AssetManager.Instance.GetAssetOfType<AssetTexture>(iconGuid) == null)
+                        {
+                            var ia = AssetManager.Instance.RegisterAsset(iconPath, iconGuid, false, 0uL) as AssetTexture;
+                            if (ia != null) ia.IsClampTextureWrapMode = true;
+                        }
+                        _texPaths[iconGuid] = iconPath;
+                        EnsureTexture(iconGuid);
+
+                        // Clone a real tattoo and repoint it at our texture, full-color.
+                        var item = ShallowClone(template);
+                        item.GUID = equipGuid;
+                        item.DisplayName = "Ink: " + name;
+                        item.VisibleInCatalog = true;
+                        item.TextureIconGUID = iconGuid;
+                        if (template.Textures != null && template.Textures.Length > 0)
+                        {
+                            var et = ShallowClone(template.Textures[0]);
+                            et.TextureGUID = texGuid;
+                            et.MaskTextureGUID = 0uL;
+                            et.ShaderType = ShaderType.NonRecolorable;
+                            item.Textures = new[] { et };
+                        }
+
+                        eq.EquipmentItems = eq.EquipmentItems.Concat(new[] { item }).ToArray();
+                        newlyAdded++;
+                        _loaded++;
+                    }
+                    catch (Exception ex)
                     {
-                        var et = ShallowClone(template.Textures[0]);
-                        et.TextureGUID = texGuid;
-                        et.MaskTextureGUID = 0uL;                 // no recolor mask
-                        et.ShaderType = ShaderType.NonRecolorable; // show the PNG's own colors
-                        item.Textures = new[] { et };
+                        _failures.Add(name + " — error");
+                        Log.LogError($"[inject] failed '{name}': {ex.Message}");
                     }
-
-                    eq.EquipmentItems = eq.EquipmentItems.Concat(new[] { item }).ToArray();
-                    added++;
-                    Log.LogInfo($"[inject] added '{item.DisplayName}' equipGUID={equipGuid} texGUID={texGuid}");
                 }
 
-                // Rebuild the GUID lookup so the item can be equipped/saved.
+                // Append the "+" tile last (only if Harmony can intercept its click).
+                if (HarmonyOk)
+                {
+                    string plusPath = Path.Combine(iconDir, "_add.png");
+                    MakePlusIcon(plusPath);
+                    ulong plusIcon = Hash("__add__|icon");
+                    if (AssetManager.Instance.GetAssetOfType<AssetTexture>(plusIcon) == null)
+                    {
+                        var pa = AssetManager.Instance.RegisterAsset(plusPath, plusIcon, false, 0uL) as AssetTexture;
+                        if (pa != null) pa.IsClampTextureWrapMode = true;
+                    }
+                    _texPaths[plusIcon] = plusPath;
+                    EnsureTexture(plusIcon);
+
+                    var plus = ShallowClone(template);
+                    plus.GUID = AddButtonGuid;
+                    plus.DisplayName = "Add custom tattoo";
+                    plus.VisibleInCatalog = true;
+                    plus.TextureIconGUID = plusIcon;
+                    eq.EquipmentItems = eq.EquipmentItems.Concat(new[] { plus }).ToArray();
+                }
+
+                // Rebuild the GUID lookup so items can be equipped/saved.
                 typeof(Equipment).GetMethod("RefreshDictionary",
                     BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(eq, null);
 
@@ -197,10 +336,131 @@ namespace InkAnywhere
                         .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
                         ?.SetValue(list, 0uL);
 
-                _status = $"injected {added} tattoo(s) — open the Tattoo category";
-                Log.LogInfo($"[inject] done, added {added}");
+                Log.LogInfo($"[inject] done: loaded={_loaded}, new={newlyAdded}, failed={_failures.Count}");
             }
-            catch (Exception e) { Log.LogError("[inject] " + e); _status = "inject error (see console)"; }
+            catch (Exception e) { Log.LogError("[inject] fatal " + e); }
+        }
+
+        // Make a clean square thumbnail: the image fit + centered on transparency.
+        private static void MakeSquareIcon(string srcPath, string outPath, int size = 256)
+        {
+            var src = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+            src.LoadImage(File.ReadAllBytes(srcPath));
+
+            // Opaque light background so dark/black tattoos are clearly visible.
+            var bg = new Color(0.93f, 0.92f, 0.90f, 1f);
+            var icon = new Texture2D(size, size, TextureFormat.ARGB32, false);
+            var pixels = new Color[size * size];
+            for (int i = 0; i < pixels.Length; i++) pixels[i] = bg;
+            icon.SetPixels(pixels);
+
+            // Fit the image, centered, and alpha-blend it over the background.
+            float aspect = (float)src.width / src.height;
+            int pad = Mathf.RoundToInt(size * 0.06f); // small margin
+            int box = size - pad * 2;
+            int w = aspect >= 1f ? box : Mathf.RoundToInt(box * aspect);
+            int h = aspect >= 1f ? Mathf.RoundToInt(box / aspect) : box;
+            int ox = (size - w) / 2, oy = (size - h) / 2;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    var c = src.GetPixelBilinear((x + 0.5f) / w, (y + 0.5f) / h);
+                    var blended = Color.Lerp(bg, new Color(c.r, c.g, c.b, 1f), c.a);
+                    icon.SetPixel(ox + x, oy + y, blended);
+                }
+            icon.Apply();
+
+            File.WriteAllBytes(outPath, icon.EncodeToPNG());
+            UnityEngine.Object.Destroy(src);
+            UnityEngine.Object.Destroy(icon);
+        }
+
+        // Draw a simple "+" tile icon (a plus on a light background).
+        private static void MakePlusIcon(string outPath, int size = 256)
+        {
+            var bg = new Color(0.90f, 0.90f, 0.92f, 1f);
+            var line = new Color(0.30f, 0.45f, 0.70f, 1f);
+            var icon = new Texture2D(size, size, TextureFormat.ARGB32, false);
+            var pixels = new Color[size * size];
+            for (int i = 0; i < pixels.Length; i++) pixels[i] = bg;
+
+            int c = size / 2, half = Mathf.RoundToInt(size * 0.22f), th = Mathf.RoundToInt(size * 0.06f);
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    bool vert = Mathf.Abs(x - c) <= th && Mathf.Abs(y - c) <= half;
+                    bool horiz = Mathf.Abs(y - c) <= th && Mathf.Abs(x - c) <= half;
+                    if (vert || horiz) pixels[y * size + x] = line;
+                }
+            icon.SetPixels(pixels);
+            icon.Apply();
+            File.WriteAllBytes(outPath, icon.EncodeToPNG());
+            UnityEngine.Object.Destroy(icon);
+        }
+
+        // Open a PNG file picker, copy the chosen file into the folder, and inject it.
+        internal void PickAndAddPng()
+        {
+            try
+            {
+                string file = OpenPngDialog();
+                if (string.IsNullOrEmpty(file) || !File.Exists(file)) return;
+
+                string dest = Path.Combine(Plugin.TattooFolder, Path.GetFileName(file));
+                if (!string.Equals(Path.GetFullPath(file), Path.GetFullPath(dest), StringComparison.OrdinalIgnoreCase))
+                    File.Copy(file, dest, true);
+
+                Inject();
+                Log.LogInfo("[add] imported " + Path.GetFileName(file));
+            }
+            catch (Exception e) { Log.LogError("[add] " + e); }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct OpenFileName
+        {
+            public int lStructSize;
+            public IntPtr hwndOwner;
+            public IntPtr hInstance;
+            public string lpstrFilter;
+            public string lpstrCustomFilter;
+            public int nMaxCustFilter;
+            public int nFilterIndex;
+            public string lpstrFile;
+            public int nMaxFile;
+            public string lpstrFileTitle;
+            public int nMaxFileTitle;
+            public string lpstrInitialDir;
+            public string lpstrTitle;
+            public int Flags;
+            public short nFileOffset;
+            public short nFileExtension;
+            public string lpstrDefExt;
+            public IntPtr lCustData;
+            public IntPtr lpfnHook;
+            public string lpTemplateName;
+            public IntPtr pvReserved;
+            public int dwReserved;
+            public int FlagsEx;
+        }
+
+        [DllImport("comdlg32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetOpenFileNameW(ref OpenFileName ofn);
+
+        private static string OpenPngDialog()
+        {
+            var ofn = new OpenFileName();
+            ofn.lStructSize = Marshal.SizeOf(ofn);
+            ofn.lpstrFilter = "PNG images\0*.png\0All files\0*.*\0\0";
+            ofn.lpstrFile = new string('\0', 1024);
+            ofn.nMaxFile = 1024;
+            ofn.lpstrFileTitle = new string('\0', 256);
+            ofn.nMaxFileTitle = 256;
+            ofn.lpstrInitialDir = Plugin.TattooFolder;
+            ofn.lpstrTitle = "Choose a PNG tattoo";
+            // OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR
+            ofn.Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008;
+            return GetOpenFileNameW(ref ofn) ? ofn.lpstrFile.TrimEnd('\0') : null;
         }
 
         // Stable 64-bit FNV-1a hash so the same file keeps the same GUID across runs.
@@ -221,59 +481,21 @@ namespace InkAnywhere
             return dst;
         }
 
-        private void Scan()
+    }
+
+    // Intercept a click on our "+" catalog tile: open the picker instead of equipping.
+    [HarmonyPatch(typeof(UIEquipmentItem), "OnListItemClicked")]
+    internal static class AddTileClickPatch
+    {
+        private static bool Prefix(UIEquipmentItem __instance)
         {
-            try
+            if (__instance != null && __instance.Equipment != null &&
+                __instance.Equipment.GUID == Runner.AddButtonGuid)
             {
-                var pngs = Directory.GetFiles(Plugin.TattooFolder, "*.png");
-                Log.LogInfo($"[scan] {pngs.Length} PNG(s)");
-                foreach (var path in pngs)
-                {
-                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!tex.LoadImage(File.ReadAllBytes(path)))
-                    {
-                        Log.LogWarning("[scan] could not decode " + Path.GetFileName(path));
-                        continue;
-                    }
-                    Log.LogInfo($"[scan] OK {Path.GetFileName(path)} {tex.width}x{tex.height} alpha={HasAlpha(tex)}");
-                }
+                Runner.Instance?.PickAndAddPng();
+                return false; // skip the normal equip behaviour
             }
-            catch (Exception e) { Log.LogError("[scan] " + e); }
-        }
-
-        private void DumpTattoos()
-        {
-            try
-            {
-                var eq = Settings.Get<Equipment>();
-                if (eq?.EquipmentItems == null) { Log.LogWarning("[dump] Equipment not ready"); _status = "equipment not loaded yet"; return; }
-
-                var decals = eq.EquipmentItems.Where(e => e != null && e.IsDecal).ToList();
-                Log.LogInfo($"[dump] total equipment={eq.EquipmentItems.Length}, decal/tattoo items={decals.Count}");
-                _status = $"equipment={eq.EquipmentItems.Length}, tattoos={decals.Count}";
-
-                foreach (var e in decals.Take(3))
-                {
-                    Log.LogInfo($"[dump] --- '{e.DisplayName}' GUID={e.GUID} model={e.CharacterModelGUID} visibleInCatalog={e.VisibleInCatalog}");
-                    if (e.Tags != null)
-                        foreach (var t in e.Tags) Log.LogInfo($"[dump]    tag={t}");
-                    if (e.Textures != null)
-                        foreach (var tx in e.Textures) Log.LogInfo($"[dump]    texGUID={tx.TextureGUID} side={tx.Side}");
-                    Log.LogInfo($"[dump]    swatchGroup={e.SwatchGroup} defaultSwatch={e.DefaultSwatch} canChangeOpacity={e.CanChangeOpacity}");
-                    Log.LogInfo($"[dump]    decalSectionData count={(e.DecalSectionData?.Length ?? 0)} iconGUID={e.TextureIconGUID}");
-                }
-
-                var models = eq.EquipmentItems.Select(e => e.CharacterModelGUID).Distinct().Take(10);
-                Log.LogInfo($"[dump] character model GUIDs: {string.Join(", ", models)}");
-            }
-            catch (Exception ex) { Log.LogError("[dump] " + ex); }
-        }
-
-        private static bool HasAlpha(Texture2D tex)
-        {
-            foreach (var p in tex.GetPixels32())
-                if (p.a < 255) return true;
-            return false;
+            return true;
         }
     }
 }

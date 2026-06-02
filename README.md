@@ -1,19 +1,28 @@
-# Ink Anywhere — Paralives custom PNG tattoo mod
+# Ink Anywhere — custom PNG tattoos for Paralives
 
-Import your own PNGs (transparent background) as tattoos and place them anywhere
-on the body using the game's native decal placement (move / scale / rotate / flip).
+Import **any PNG** (transparent background) as a real, placeable, **full-color**
+tattoo in Paralives. Drop images in a folder — or add them live in-game with a
+**"+" tile** in the tattoo catalog that opens a file picker. They behave like
+built-in tattoos: move / scale / rotate / flip with the game's own decal tools.
 
-A BepInEx (Unity/C#) script mod. Not for Steam Workshop (script mods aren't
-allowed there) — distribute via Nexus / GitHub / 6ix Plugin Hub.
+A [BepInEx](https://github.com/BepInEx/BepInEx) (Unity / C#) script mod. Not for
+the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nexus.
 
-## Status
+## Features
 
-- **Phase 0 (done, builds):** loads as a plugin, creates a `CustomTattoos`
-  folder next to `Paralives.exe`, and on hotkey **F6** decodes every PNG there
-  into a Unity texture and logs size + alpha. Proves the PNG→engine path.
-- **Phase 1+ (next):** register the texture with `AssetManager`, build an
-  `EquipmentItem(IsDecal=true)`, inject it into the Paramaker catalog, reuse the
-  game's `UIDecalPlacement`. See the roadmap comment in `Plugin.cs`.
+- Import any PNG as a tattoo — full color, transparency preserved.
+- **In-game "+" tile** (last in the tattoo grid) → native PNG file picker → instant add.
+- Or just drop PNGs into the `CustomTattoos` folder; they auto-load on startup.
+- Tidy auto-generated catalog thumbnails (image fit + centered on a light background).
+- Wider decal scaling than vanilla (0.05–6 instead of 0.25–1.5).
+- Stable: invalid images are skipped, and deleting a PNG cleanly removes its tattoo.
+
+## Install
+
+1. Install **BepInEx 5 (x64, Mono)** into your Paralives folder; run the game once.
+2. Drop `ParalivesInkAnywhere.dll` into `…/Paralives/BepInEx/plugins/InkAnywhere/`.
+3. Launch. Add PNGs via the in-game **+** tile, or place them in the
+   `…/Paralives/CustomTattoos/` folder.
 
 ## Build
 
@@ -21,25 +30,30 @@ allowed there) — distribute via Nexus / GitHub / 6ix Plugin Hub.
 dotnet build -c Release
 ```
 
-The build auto-copies the DLL to
-`...\Paralives\BepInEx\plugins\InkAnywhere\`. Paths are set in the `.csproj`
-(`GameManaged`, `PluginsDir`) — edit if your install moves.
+Paths to your install are set in `ParalivesInkAnywhere.csproj` (`GameManaged`,
+`GameRoot`, `PluginsDir`). The build auto-copies the DLL into the plugins folder.
 
-## Test (Phase 0)
+## How it works
 
-1. Launch Paralives once after installing BepInEx so it generates
-   `BepInEx\config` and `BepInEx\LogOutput.log`.
-2. Confirm load: `LogOutput.log` shows `Ink Anywhere loaded.`
-3. Put a transparent `.png` in `...\Paralives\CustomTattoos\`.
-4. In-game press **F6** → the log reports `OK <file> WxH ... hasAlpha=True`.
+The mod never edits game files. At runtime it:
 
-## Key game internals (from decompiling Paralives.dll)
+1. **Loads each PNG** into a `Texture2D` and registers it with the game's
+   `AssetManager` under a stable GUID (FNV-1a hash of the filename).
+2. **Clones an existing tattoo** `EquipmentItem` (reusing its tags / swatch /
+   decal-section data), repoints it at our texture, sets `ShaderType.NonRecolorable`
+   (so the PNG keeps its own colors), and appends it to `Settings.Get<Equipment>()`.
+   The native catalog and decal-placement UI then treat it like any tattoo.
+3. A **watchdog** re-asserts our textures every frame — the game periodically
+   unloads them and its own reload returns null, which would NRE the skin
+   compositor; we reload from disk to prevent that.
+4. The **"+" tile** is an injected `EquipmentItem`; a Harmony prefix on
+   `UIEquipmentItem.OnListItemClicked` intercepts clicks on it to open a Win32
+   PNG file picker instead of equipping.
 
-- Tattoo = `Setting.EquipmentItem` + `IsDecal` + `EquipmentTexture.TextureGUID`.
-- `AssetManager.Instance` — GUID-keyed assets; `RegisterAsset(...)`, `GetSprite(guid)`.
-- `UIDecalPlacement.Show(...)` — full placement UI, already in the engine.
-- `ModManager.Instance.LocalMod` — writable system mod for persisting content.
-- `EquipmentItemDuplicator` — the game's own "create equipment item" routine.
+### Notes / gotchas
 
-Decompiled reference source:
-`..\ParalivesBetterRelationships\_tools\Paralives.decompiled\`
+- BepInEx's manager object doesn't tick `Update`/`OnGUI` on this game, so all
+  per-frame logic runs on a self-spawned `GameObject`.
+- Harmony must use BepInEx's bundled `0Harmony.dll` (referencing the newer
+  HarmonyX NuGet pulls a `MonoMod.Backports` dependency that isn't deployed).
+
