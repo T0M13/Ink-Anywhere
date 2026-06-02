@@ -17,6 +17,18 @@ the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nex
   <a href="https://www.patreon.com/c/T0M1"><img src="https://i.imgur.com/RW3Vg8M.png" alt="Support on Patreon"></a>
 </p>
 
+## Download
+
+<p align="center">
+  <a href="https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.1.0_Beta.zip">
+    <img src="https://img.shields.io/badge/Download-InkAnywhere_0.1.0_Beta.zip-2ea44f?style=for-the-badge&logo=github" alt="Download InkAnywhere_0.1.0_Beta.zip">
+  </a>
+</p>
+
+Download the release zip from the [latest GitHub release](https://github.com/T0M13/Ink-Anywhere/releases/latest) or from
+[Nexus Mods](https://www.nexusmods.com/paralives/mods/154). Players do **not**
+need to build this project.
+
 ## Features
 
 - Import any PNG as a tattoo — full color, transparency preserved.
@@ -40,12 +52,18 @@ the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nex
 
 ## Install
 
-1. Install **BepInEx 5 (x64, Mono)** into your Paralives folder; run the game once.
-2. Drop `ParalivesInkAnywhere.dll` into `…/Paralives/BepInEx/plugins/InkAnywhere/`.
-3. Launch. Add PNGs via the in-game **+** tile, or place them in the
-   `…/Paralives/CustomTattoos/` folder.
+1. Install **BepInEx 5 (x64, Mono)** into your Paralives folder.
+2. Run Paralives once, then close it.
+3. Download `InkAnywhere_0.1.0_Beta.zip` from the
+   [latest release](https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.1.0_Beta.zip).
+   Do not download the source code zip unless you want the project files.
+4. Extract the zip into your Paralives game folder.
+5. Confirm the DLL is here:
+   `…/Paralives/BepInEx/plugins/InkAnywhere/ParalivesInkAnywhere.dll`
+6. Launch Paralives. Add PNGs via the in-game **+** tile, or place them in:
+   `…/Paralives/CustomTattoos/`
 
-## Build
+## Build from source
 
 ```powershell
 dotnet build -c Release
