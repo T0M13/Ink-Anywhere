@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>ParalivesInkAnywhere</AssemblyName>
+    <Product>Ink Anywhere</Product>
+    <Version>0.1.0</Version>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>InkAnywhere</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Core" Version="5.*" />
+  </ItemGroup>
+
+  <!-- Path to YOUR Paralives managed DLLs. Confirmed present on this machine. -->
+  <PropertyGroup>
+    <GameManaged>C:\Program Files (x86)\Steam\steamapps\common\Paralives\Paralives_Data\Managed</GameManaged>
+    <!-- Auto-deploy the built DLL straight into BepInEx after each build -->
+    <PluginsDir>C:\Program Files (x86)\Steam\steamapps\common\Paralives\BepInEx\plugins\InkAnywhere</PluginsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Paralives">
+      <HintPath>$(GameManaged)\Paralives.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManaged)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(GameManaged)\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Mathematics">
+      <HintPath>$(GameManaged)\Unity.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Copy the plugin into the game's BepInEx\plugins folder on build -->
+  <Target Name="DeployToGame" AfterTargets="Build">
+    <MakeDir Directories="$(PluginsDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginsDir)" />
+    <Message Importance="high" Text="Deployed $(AssemblyName).dll -> $(PluginsDir)" />
+  </Target>
+
+</Project>
