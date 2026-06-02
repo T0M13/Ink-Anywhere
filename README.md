@@ -77,4 +77,3 @@ The mod never edits game files. At runtime it:
   per-frame logic runs on a self-spawned `GameObject`.
 - Harmony must use BepInEx's bundled `0Harmony.dll` (referencing the newer
   HarmonyX NuGet pulls a `MonoMod.Backports` dependency that isn't deployed).
-
