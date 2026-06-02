@@ -29,6 +29,8 @@ Download the release zip from the [latest GitHub release](https://github.com/T0M
 [Nexus Mods](https://www.nexusmods.com/paralives/mods/154). Players do **not**
 need to build this project.
 
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## Features
 
 - Import any PNG as a tattoo — full color, transparency preserved.

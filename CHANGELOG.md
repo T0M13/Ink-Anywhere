@@ -1,0 +1,76 @@
+# Changelog
+
+## 0.1.0 Beta - 2026-06-02
+
+First public beta release of Ink Anywhere for Paralives.
+
+### Released
+
+- Published the Nexus Mods page:
+  <https://www.nexusmods.com/paralives/mods/154>
+- Published the GitHub repository:
+  <https://github.com/T0M13/Ink-Anywhere>
+- Published the GitHub release download:
+  <https://github.com/T0M13/Ink-Anywhere/releases/tag/v0.1.0-beta>
+- Prepared a Steam Workshop companion/listing for discovery and install instructions.
+
+### Added
+
+- Import custom PNG files as full-color tattoos in Paralives.
+- Load PNG files from the `CustomTattoos` folder on game start.
+- Add an in-game `+` tile to the tattoo catalog.
+- Open a native PNG file picker from the `+` tile.
+- Register imported PNGs as Paralives texture assets at runtime.
+- Clone an existing tattoo item so custom PNGs use the normal tattoo catalog and placement UI.
+- Preserve full image colors with `ShaderType.NonRecolorable`.
+- Generate clean square catalog thumbnails for imported PNGs.
+- Expand decal scaling to `0.05` through `6`.
+- Skip invalid image files safely.
+- Reload custom textures if the game unloads them during runtime.
+- Fall back to an on-screen add button if the in-grid tile hook is unavailable.
+
+### Packaging
+
+- Added a player-ready release zip:
+  `InkAnywhere_0.1.0_Beta.zip`
+- The zip extracts into this game-folder layout:
+
+```text
+BepInEx/plugins/InkAnywhere/ParalivesInkAnywhere.dll
+README.md
+inkanywhere_banner.png
+```
+
+- Added a direct GitHub download button to the README.
+- Added install instructions for players who do not want to build from source.
+- Added README banner, screenshots, and support links.
+
+### Requirements
+
+- Paralives
+- BepInEx 5 x64 Mono
+
+### Install
+
+1. Install BepInEx 5 x64 Mono into the Paralives folder.
+2. Run Paralives once, then close it.
+3. Download `InkAnywhere_0.1.0_Beta.zip` from GitHub Releases or Nexus Mods.
+4. Extract the zip into the Paralives game folder.
+5. Confirm the DLL is here:
+   `Paralives/BepInEx/plugins/InkAnywhere/ParalivesInkAnywhere.dll`
+6. Launch Paralives.
+7. Add PNGs with the in-game `+` tile, or place PNG files in:
+   `Paralives/CustomTattoos/`
+
+### Steam Workshop Notes
+
+Steam Workshop is used as a companion/listing for this mod. The Workshop item
+can explain the mod and point users to the release download, but the code-based
+BepInEx plugin must still be installed from GitHub Releases or Nexus Mods.
+
+### Known Limitations
+
+- Early beta. Game updates may break the mod.
+- Windows-only file picker implementation.
+- Requires BepInEx.
+- Steam Workshop subscription alone does not install the DLL.
