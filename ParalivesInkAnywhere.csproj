@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>ParalivesInkAnywhere</AssemblyName>
     <Product>Ink Anywhere</Product>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <LangVersion>latest</LangVersion>
     <RootNamespace>InkAnywhere</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.2.0")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.2.1")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -76,7 +76,6 @@ namespace InkAnywhere
         private void Awake() => Instance = this;
 
         private bool _updateSeen;
-        private bool _dumped;
         private float _nextCheck;
 
         // Results for the status panel.
@@ -109,16 +108,15 @@ namespace InkAnywhere
                 Log.LogInfo("Runner.Update is ticking!");
             }
 
-            // Once the equipment data is loaded, auto-inject all PNGs from the folder.
-            if (!_dumped && Time.unscaledTime >= _nextCheck)
+            // Self-heal: the game rebuilds its Equipment catalog when Workshop mods load
+            // or when you exit/re-enter a save, which wipes our injected items. So keep
+            // checking, and (re)inject whenever our items are missing.
+            if (Time.unscaledTime >= _nextCheck)
             {
                 _nextCheck = Time.unscaledTime + 1f;
                 var eq = Settings.Get<Equipment>();
-                if (eq?.EquipmentItems != null && eq.EquipmentItems.Length > 0)
-                {
-                    _dumped = true;
+                if (eq?.EquipmentItems != null && eq.EquipmentItems.Length > 0 && !OurItemsPresent(eq))
                     Inject();
-                }
             }
 
             // Keep our textures alive every frame so the skin compositor never NREs.
@@ -253,6 +251,15 @@ namespace InkAnywhere
                 _panelOpen = false;
         }
 
+        // Are our injected items still in the catalog? (They get wiped on mod reload.)
+        private static bool OurItemsPresent(Equipment eq)
+        {
+            if (HarmonyOk)
+                return eq.EquipmentItems.Any(e => e != null && e.GUID == AddButtonGuid);
+            return eq.EquipmentItems.Any(e => e != null && e.DisplayName != null &&
+                                              e.DisplayName.StartsWith("Ink: "));
+        }
+
         // ---- Turn every PNG in the folder into a tattoo in the catalog ----
         private void Inject()
         {
@@ -306,11 +313,11 @@ namespace InkAnywhere
                         _texPaths[texGuid] = path;
                         EnsureTexture(texGuid);
 
-                        // Tidy square thumbnail (regenerated each run so it self-heals).
+                        // Tidy square thumbnail (built once per session; survives re-injects).
                         string iconPath = Path.Combine(iconDir, name + ".png");
-                        MakeSquareIcon(path, iconPath);
                         if (AssetManager.Instance.GetAssetOfType<AssetTexture>(iconGuid) == null)
                         {
+                            MakeSquareIcon(path, iconPath);
                             var ia = AssetManager.Instance.RegisterAsset(iconPath, iconGuid, false, 0uL) as AssetTexture;
                             if (ia != null) ia.IsClampTextureWrapMode = true;
                         }
@@ -347,10 +354,10 @@ namespace InkAnywhere
                 if (HarmonyOk)
                 {
                     string plusPath = Path.Combine(iconDir, "_add.png");
-                    MakePlusIcon(plusPath);
                     ulong plusIcon = Hash("__add__|icon");
                     if (AssetManager.Instance.GetAssetOfType<AssetTexture>(plusIcon) == null)
                     {
+                        MakePlusIcon(plusPath);
                         var pa = AssetManager.Instance.RegisterAsset(plusPath, plusIcon, false, 0uL) as AssetTexture;
                         if (pa != null) pa.IsClampTextureWrapMode = true;
                     }

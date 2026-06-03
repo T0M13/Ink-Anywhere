@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 Beta - 2026-06-03
+
+### Fixed
+
+- **Mod no longer disappears when Steam Workshop mods are enabled or when re-entering a save.**
+  The game rebuilds its tattoo catalog in those cases, which wiped the injected tattoos and
+  the "+" tile. The mod now self-heals: it detects when its items are missing and re-injects
+  them automatically, so the "+" tile and custom tattoos stay available.
+
 ## 0.2.0 Beta - 2026-06-03
 
 ### Added
