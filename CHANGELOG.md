@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 Beta - 2026-06-03
+
+### Added
+
+- In-grid delete: custom tattoo tiles now show a small "x" button to remove them.
+- Confirmation dialog (native Yes/No prompt) before deleting a custom tattoo.
+- Deleting a tattoo unequips it, removes it from the catalog, and deletes its PNG file.
+
+### Changed
+
+- Thumbnails are now composited onto a light background so dark/black tattoos are clearly visible.
+
+### Fixed
+
+- Adding or deleting a tattoo now fully refreshes the catalog in-place (rebuilds for a
+  short window so new thumbnails — including the "+" tile — appear without reopening the section).
+
 ## 0.1.0 Beta - 2026-06-02
 
 First public beta release of Ink Anywhere for Paralives.

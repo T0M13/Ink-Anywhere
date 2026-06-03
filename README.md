@@ -20,8 +20,8 @@ the Steam Workshop (script mods aren't allowed there) — share via GitHub / Nex
 ## Download
 
 <p align="center">
-  <a href="https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.1.0_Beta.zip">
-    <img src="https://img.shields.io/badge/Download-InkAnywhere_0.1.0_Beta.zip-2ea44f?style=for-the-badge&logo=github" alt="Download InkAnywhere_0.1.0_Beta.zip">
+  <a href="https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.2.0_Beta.zip">
+    <img src="https://img.shields.io/badge/Download-InkAnywhere_0.2.0_Beta.zip-2ea44f?style=for-the-badge&logo=github" alt="Download InkAnywhere_0.2.0_Beta.zip">
   </a>
 </p>
 
@@ -56,8 +56,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 1. Install **BepInEx 5 (x64, Mono)** into your Paralives folder.
 2. Run Paralives once, then close it.
-3. Download `InkAnywhere_0.1.0_Beta.zip` from the
-   [latest release](https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.1.0_Beta.zip).
+3. Download `InkAnywhere_0.2.0_Beta.zip` from the
+   [latest release](https://github.com/T0M13/Ink-Anywhere/releases/latest/download/InkAnywhere_0.2.0_Beta.zip).
    Do not download the source code zip unless you want the project files.
 4. Extract the zip into your Paralives game folder.
 5. Confirm the DLL is here:

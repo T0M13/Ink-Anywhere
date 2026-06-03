@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>ParalivesInkAnywhere</AssemblyName>
     <Product>Ink Anywhere</Product>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <LangVersion>latest</LangVersion>
     <RootNamespace>InkAnywhere</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -45,6 +45,10 @@
     </Reference>
     <Reference Include="UnityEngine.UI">
       <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(GameManaged)\UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">

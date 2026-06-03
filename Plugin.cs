@@ -9,10 +9,11 @@ using BepInEx.Logging;
 using HarmonyLib;
 using Setting;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.1.0")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -87,6 +88,12 @@ namespace InkAnywhere
         private bool _inTattooSection;
         private float _nextSectionCheck;
 
+        // Deferred catalog rebuild: we rebuild repeatedly for a short window so newly
+        // added thumbnails (whose sprite isn't ready the first frame) catch up —
+        // this is what manually reopening the section was doing.
+        private float _refreshUntil;
+        private float _nextRefreshTick;
+
         // Watchdog: the game keeps unloading our texture and its own reload returns
         // null, which NREs the skin compositor. We track each texture GUID -> source
         // PNG path and re-load it ourselves whenever the asset's texture goes null.
@@ -126,6 +133,38 @@ namespace InkAnywhere
                 _inTattooSection = false;
                 foreach (var l in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
                     if (l != null && l.isActiveAndEnabled && l.UIDecalPositions != null) { _inTattooSection = true; break; }
+            }
+
+            // Apply requested catalog rebuilds here (safe — not mid-click).
+            if (Time.unscaledTime < _refreshUntil && Time.unscaledTime >= _nextRefreshTick)
+            {
+                _nextRefreshTick = Time.unscaledTime + 0.2f;
+                RefreshCatalog();
+            }
+        }
+
+        // Ask for the catalog to be rebuilt over the next ~1.2s (covers thumbnail load).
+        private void RequestRefresh() => _refreshUntil = Time.unscaledTime + 1.2f;
+
+        // Force the tattoo catalog to fully rebuild now (like closing + reopening it).
+        private void RefreshCatalog()
+        {
+            // Pre-create our icon sprites so tiles (incl. the "+") never build blank.
+            foreach (var guid in _texPaths.Keys)
+            {
+                try { var _ = AssetManager.Instance.GetSprite(guid); } catch { /* not ready yet */ }
+            }
+
+            foreach (var list in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
+            {
+                try
+                {
+                    typeof(UICharacterCreatorContextualList)
+                        .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
+                        ?.SetValue(list, 0uL);
+                    list.RefreshListContent();
+                }
+                catch (Exception e) { Log.LogError("[refresh] " + e); }
             }
         }
 
@@ -330,11 +369,8 @@ namespace InkAnywhere
                 typeof(Equipment).GetMethod("RefreshDictionary",
                     BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(eq, null);
 
-                // Force the catalog UI to rebuild on its next frame.
-                foreach (var list in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
-                    typeof(UICharacterCreatorContextualList)
-                        .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
-                        ?.SetValue(list, 0uL);
+                // Fully rebuild the catalog UI over the next moment.
+                RequestRefresh();
 
                 Log.LogInfo($"[inject] done: loaded={_loaded}, new={newlyAdded}, failed={_failures.Count}");
             }
@@ -414,6 +450,154 @@ namespace InkAnywhere
                 Log.LogInfo("[add] imported " + Path.GetFileName(file));
             }
             catch (Exception e) { Log.LogError("[add] " + e); }
+        }
+
+        // ---- In-grid delete: add a small "x" to our custom tattoo tiles ----
+
+        // Called from the Init postfix for every catalog tile.
+        internal void DecorateTile(UIEquipmentItem tile, EquipmentItem equipment)
+        {
+            if (tile == null) return;
+            bool ours = equipment != null && equipment.DisplayName != null &&
+                        equipment.DisplayName.StartsWith("Ink: ");
+
+            var existing = tile.transform.Find("InkDeleteBtn");
+            if (!ours)
+            {
+                if (existing != null) existing.gameObject.SetActive(false);
+                return;
+            }
+
+            var go = existing != null ? existing.gameObject : CreateDeleteButton(tile.transform);
+            go.SetActive(true);
+
+            string name = equipment.DisplayName.Substring("Ink: ".Length);
+            var btn = go.GetComponent<Button>();
+            btn.onClick.RemoveAllListeners();
+            btn.onClick.AddListener(() => DeleteCustomTattoo(name));
+        }
+
+        private static GameObject CreateDeleteButton(Transform parent)
+        {
+            var go = new GameObject("InkDeleteBtn",
+                typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button), typeof(LayoutElement));
+            go.transform.SetParent(parent, false);
+
+            var rt = (RectTransform)go.transform;
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 1f);
+            rt.anchoredPosition = new Vector2(-5f, -5f);
+            rt.sizeDelta = new Vector2(24f, 24f);
+
+            var img = go.GetComponent<Image>();
+            img.sprite = DeleteSprite();
+            img.raycastTarget = true;
+
+            go.GetComponent<LayoutElement>().ignoreLayout = true; // don't let the grid reposition it
+            go.transform.SetAsLastSibling();
+            return go;
+        }
+
+        private static Sprite _deleteSprite;
+        private static Sprite DeleteSprite()
+        {
+            if (_deleteSprite != null) return _deleteSprite;
+            int s = 64;
+            var t = new Texture2D(s, s, TextureFormat.ARGB32, false)
+            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear };
+
+            var px = new Color[s * s];
+            var center = new Vector2(s / 2f, s / 2f);
+            float r = s / 2f - 1.5f;
+            var red = new Color(0.85f, 0.22f, 0.22f);
+            float arm = s * 0.24f, thick = 3.0f;
+
+            for (int y = 0; y < s; y++)
+                for (int x = 0; x < s; x++)
+                {
+                    var p = new Vector2(x + 0.5f, y + 0.5f);
+                    float circleA = Mathf.Clamp01(r - Vector2.Distance(p, center) + 0.5f); // soft edge
+
+                    float u = p.x - center.x, v = p.y - center.y;
+                    float xA = 0f;
+                    if (Mathf.Max(Mathf.Abs(u), Mathf.Abs(v)) <= arm)
+                    {
+                        float dToX = Mathf.Min(Mathf.Abs(u - v), Mathf.Abs(u + v)) / 1.41421f;
+                        xA = Mathf.Clamp01(thick - dToX + 0.5f); // soft white X
+                    }
+
+                    var col = Color.Lerp(red, Color.white, xA);
+                    col.a = circleA;
+                    px[y * s + x] = col;
+                }
+
+            t.SetPixels(px);
+            t.Apply();
+            _deleteSprite = Sprite.Create(t, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f));
+            _deleteSprite.hideFlags = HideFlags.HideAndDontSave;
+            return _deleteSprite;
+        }
+
+        // Ask for confirmation before deleting (uses the game's native Yes/No prompt).
+        private void DeleteCustomTattoo(string name)
+        {
+            try
+            {
+                UI.Get<UIPrompt>().ShowYesNo(
+                    "Delete custom tattoo",
+                    $"Delete \"{name}\" and remove its PNG file? This cannot be undone.",
+                    () => DoDeleteCustomTattoo(name), false, null);
+            }
+            catch (Exception e)
+            {
+                // If the prompt isn't available for some reason, fall back to deleting.
+                Log.LogWarning("[delete] prompt failed, deleting directly: " + e.Message);
+                DoDeleteCustomTattoo(name);
+            }
+        }
+
+        // Actually delete: unequip it, remove the catalog item, delete the files, refresh.
+        private void DoDeleteCustomTattoo(string name)
+        {
+            try
+            {
+                ulong equipGuid = Hash(name + "|equip");
+                ulong texGuid = Hash(name + "|tex");
+                ulong iconGuid = Hash(name + "|icon");
+
+                // Unequip from whichever character is being edited.
+                foreach (var list in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
+                {
+                    var player = list.UICharacterCreator?.PlayerOwner?.Player;
+                    if (player == null) continue;
+                    var ch = AssetManager.Instance.GetCharacter(player.GetSelectedCharacterGUID());
+                    ch?.GetCurrentCharacterModel()?.CurrentEquipment?.RemoveAll(e => e.EquipmentGUID == equipGuid);
+                }
+
+                // Remove the catalog item.
+                var eq = Settings.Get<Equipment>();
+                if (eq?.EquipmentItems != null)
+                {
+                    eq.EquipmentItems = eq.EquipmentItems.Where(e => e == null || e.GUID != equipGuid).ToArray();
+                    typeof(Equipment).GetMethod("RefreshDictionary",
+                        BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(eq, null);
+                }
+
+                // Stop tracking + delete the source files.
+                _texPaths.Remove(texGuid);
+                _texPaths.Remove(iconGuid);
+                TryDelete(Path.Combine(Plugin.TattooFolder, name + ".png"));
+                TryDelete(Path.Combine(Plugin.TattooFolder, "_icons", name + ".png"));
+
+                RequestRefresh();
+                Log.LogInfo("[delete] removed " + name);
+            }
+            catch (Exception e) { Log.LogError("[delete] " + e); }
+        }
+
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception e) { Log.LogWarning("[delete] could not delete " + path + ": " + e.Message); }
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -496,6 +680,17 @@ namespace InkAnywhere
                 return false; // skip the normal equip behaviour
             }
             return true;
+        }
+    }
+
+    // Add a delete "x" to our custom tattoo tiles (and hide it on other tiles, since
+    // tiles are pooled and reused).
+    [HarmonyPatch(typeof(UIEquipmentItem), "Init")]
+    internal static class TileInitPatch
+    {
+        private static void Postfix(UIEquipmentItem __instance, EquipmentItem equipment)
+        {
+            Runner.Instance?.DecorateTile(__instance, equipment);
         }
     }
 }
