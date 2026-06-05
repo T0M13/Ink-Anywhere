@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.2.1")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.2.2")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -76,7 +76,7 @@ namespace InkAnywhere
         private void Awake() => Instance = this;
 
         private bool _updateSeen;
-        private float _nextCheck;
+        private float _nextWatchdog;
 
         // Results for the status panel.
         private int _loaded;
@@ -85,7 +85,10 @@ namespace InkAnywhere
 
         // True while the Paramaker tattoo (decal) section is open — shows the + button.
         private bool _inTattooSection;
-        private float _nextSectionCheck;
+
+        // Set by the catalog hook (OnCatalogRefreshing); means "we're in the Paramaker now".
+        private UICharacterCreatorContextualList _activeList;
+        private float _lastCatalogActive;
 
         // Deferred catalog rebuild: we rebuild repeatedly for a short window so newly
         // added thumbnails (whose sprite isn't ready the first frame) catch up —
@@ -108,36 +111,49 @@ namespace InkAnywhere
                 Log.LogInfo("Runner.Update is ticking!");
             }
 
-            // Self-heal: the game rebuilds its Equipment catalog when Workshop mods load
-            // or when you exit/re-enter a save, which wipes our injected items. So keep
-            // checking, and (re)inject whenever our items are missing.
-            if (Time.unscaledTime >= _nextCheck)
-            {
-                _nextCheck = Time.unscaledTime + 1f;
-                var eq = Settings.Get<Equipment>();
-                if (eq?.EquipmentItems != null && eq.EquipmentItems.Length > 0 && !OurItemsPresent(eq))
-                    Inject();
-            }
+            // Everything else only matters in the Paramaker. The catalog hook
+            // (OnCatalogRefreshing) sets _lastCatalogActive every frame the tattoo/clothing
+            // catalog updates, and handles (re)injecting wiped items. So when we're not in
+            // there, Update does nothing — no game-wide polling.
+            bool catalogActive = Time.unscaledTime - _lastCatalogActive < 1.5f;
+            if (!catalogActive) { _inTattooSection = false; return; }
 
-            // Keep our textures alive every frame so the skin compositor never NREs.
-            if (_texPaths.Count > 0)
+            // Keep our textures valid while editing (the compositor reads them). Throttled —
+            // the game only unloads them occasionally, so twice a second is plenty.
+            if (_texPaths.Count > 0 && Time.unscaledTime >= _nextWatchdog)
+            {
+                _nextWatchdog = Time.unscaledTime + 0.5f;
                 foreach (var guid in _texPaths.Keys)
                     EnsureTexture(guid);
-
-            // Detect whether we're in the tattoo section (a few times a second).
-            if (Time.unscaledTime >= _nextSectionCheck)
-            {
-                _nextSectionCheck = Time.unscaledTime + 0.25f;
-                _inTattooSection = false;
-                foreach (var l in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
-                    if (l != null && l.isActiveAndEnabled && l.UIDecalPositions != null) { _inTattooSection = true; break; }
             }
 
-            // Apply requested catalog rebuilds here (safe — not mid-click).
+            // Apply requested catalog rebuilds here (after add/delete; not mid-click).
             if (Time.unscaledTime < _refreshUntil && Time.unscaledTime >= _nextRefreshTick)
             {
                 _nextRefreshTick = Time.unscaledTime + 0.2f;
                 RefreshCatalog();
+            }
+        }
+
+        // Called (via Harmony) every time the Paramaker catalog list refreshes — i.e. only
+        // while you're in character customization. This is our event hook: it marks the
+        // catalog active and re-injects our items if the game wiped them.
+        internal void OnCatalogRefreshing(UICharacterCreatorContextualList list)
+        {
+            _activeList = list;
+            _lastCatalogActive = Time.unscaledTime;
+            _inTattooSection = list != null && list.UIDecalPositions != null;
+
+            var eq = Settings.Get<Equipment>();
+            if (eq?.EquipmentItems == null || eq.EquipmentItems.Length == 0) return;
+            if (!OurItemsPresent(eq))
+            {
+                Inject();
+                // Force this same refresh to rebuild now that our items are back.
+                if (list != null)
+                    typeof(UICharacterCreatorContextualList)
+                        .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
+                        ?.SetValue(list, 0uL);
             }
         }
 
@@ -147,23 +163,23 @@ namespace InkAnywhere
         // Force the tattoo catalog to fully rebuild now (like closing + reopening it).
         private void RefreshCatalog()
         {
+            var list = _activeList;
+            if (list == null) return;
+
             // Pre-create our icon sprites so tiles (incl. the "+") never build blank.
             foreach (var guid in _texPaths.Keys)
             {
                 try { var _ = AssetManager.Instance.GetSprite(guid); } catch { /* not ready yet */ }
             }
 
-            foreach (var list in UnityEngine.Object.FindObjectsOfType<UICharacterCreatorContextualList>())
+            try
             {
-                try
-                {
-                    typeof(UICharacterCreatorContextualList)
-                        .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
-                        ?.SetValue(list, 0uL);
-                    list.RefreshListContent();
-                }
-                catch (Exception e) { Log.LogError("[refresh] " + e); }
+                typeof(UICharacterCreatorContextualList)
+                    .GetField("_lastTagsHash", BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?.SetValue(list, 0uL);
+                list.RefreshListContent();
             }
+            catch (Exception e) { Log.LogError("[refresh] " + e); }
         }
 
         // Reload our PNG into the asset whenever its texture is missing/destroyed.
@@ -698,6 +714,18 @@ namespace InkAnywhere
         private static void Postfix(UIEquipmentItem __instance, EquipmentItem equipment)
         {
             Runner.Instance?.DecorateTile(__instance, equipment);
+        }
+    }
+
+    // Our main event hook: fires whenever the Paramaker catalog refreshes (only while in
+    // character customization). Drives injection + texture upkeep, so we never poll the
+    // whole game from Update.
+    [HarmonyPatch(typeof(UICharacterCreatorContextualList), "RefreshListContent")]
+    internal static class CatalogRefreshPatch
+    {
+        private static void Prefix(UICharacterCreatorContextualList __instance)
+        {
+            Runner.Instance?.OnCatalogRefreshing(__instance);
         }
     }
 }

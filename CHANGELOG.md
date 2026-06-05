@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.2 Beta (experimental) - 2026-06-05
+
+Performance + reliability rework. Experimental — 0.2.1 remains the stable release.
+
+### Fixed / Changed
+
+- **Fixes background slowdown.** The mod no longer does any per-frame work during normal
+  gameplay. Previously it polled every second and ran the texture upkeep every frame even
+  outside character customization.
+- **Event-driven now.** All logic is hooked to the Paramaker catalog refresh, so it only
+  runs while you're in character customization, and re-injects our tattoos/"+" tile exactly
+  when the game rebuilds the catalog (Workshop mods, save changes) — closing the gap where
+  items could briefly go missing.
+- Removed the repeated `FindObjectsOfType` scans; the texture watchdog is throttled and only
+  active in the Paramaker.
+
 ## 0.2.1 Beta - 2026-06-03
 
 ### Fixed
