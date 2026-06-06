@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 Beta - 2026-06-06
+
+### Fixed
+
+- **Custom tattoos now show when loading a save** — previously a saved character's tattoo
+  was blank until you opened the Paramaker and backed out. The mod now re-injects in live
+  mode and re-renders loaded characters so worn tattoos appear immediately.
+
+(Includes everything from 0.3.0 below.)
+
 ## 0.3.0 Beta - 2026-06-06
 
 ### Added

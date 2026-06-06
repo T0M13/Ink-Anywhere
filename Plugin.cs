@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.3.0")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.3.1")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -116,6 +116,7 @@ namespace InkAnywhere
         private void Awake() => Instance = this;
 
         private bool _updateSeen;
+        private float _nextCheck;
         private float _nextWatchdog;
 
         // Results for the status panel.
@@ -183,15 +184,21 @@ namespace InkAnywhere
                 DevEvent("runner update ticking");
             }
 
-            // Everything else only matters in the Paramaker. The catalog hook
-            // (OnCatalogRefreshing) sets _lastCatalogActive every frame the tattoo/clothing
-            // catalog updates, and handles (re)injecting wiped items. So when we're not in
-            // there, Update does nothing — no game-wide polling.
-            bool catalogActive = Time.unscaledTime - _lastCatalogActive < 1.5f;
-            if (!catalogActive) { _inTattooSection = false; return; }
+            // Self-heal: re-add our tattoos whenever the game wiped them (game/save load,
+            // Workshop reload). Runs always — this is cheap (one dictionary lookup + a scan
+            // a couple times a second) — so saved tattoos render in live mode too, not only
+            // after opening the Paramaker. (0.3.0 mistakenly gated this to the Paramaker,
+            // which left loaded saves showing blank tattoos until you opened it.)
+            if (Time.unscaledTime >= _nextCheck)
+            {
+                _nextCheck = Time.unscaledTime + 1f;
+                var eq = Settings.Get<Equipment>();
+                if (eq?.EquipmentItems != null && eq.EquipmentItems.Length > 0 && !OurItemsPresent(eq))
+                    Inject();
+            }
 
-            // Keep our textures valid while editing (the compositor reads them). Throttled —
-            // the game only unloads them occasionally, so twice a second is plenty.
+            // Keep our textures loaded (incl. worn tattoos in live mode). Cheap + throttled;
+            // the expensive game-wide work was removed, so running this always is fine.
             if (_texPaths.Count > 0 && Time.unscaledTime >= _nextWatchdog)
             {
                 _nextWatchdog = Time.unscaledTime + 0.5f;
@@ -199,8 +206,10 @@ namespace InkAnywhere
                     EnsureTexture(guid);
             }
 
-            // Apply a requested catalog rebuild here (not mid-click). Our textures are
-            // protected + pre-warmed, so one rebuild is enough.
+            // Fallback button only matters while the tattoo section is open.
+            if (Time.unscaledTime - _lastCatalogActive >= 1.5f) _inTattooSection = false;
+
+            // Apply a requested catalog rebuild here (only does work in the Paramaker).
             if (_rebuildPending)
             {
                 _rebuildPending = false;
@@ -466,6 +475,25 @@ namespace InkAnywhere
                                                   e.DisplayName.StartsWith("Ink: ")) ?? 0;
         }
 
+        // Force loaded characters to recomposite their skin so a worn custom tattoo renders
+        // right after we (re)inject it — the game only redraws when IsTextureDirty is set,
+        // so without this a loaded save shows blank tattoos until you open the Paramaker.
+        private static void MarkLoadedCharactersDirty()
+        {
+            try
+            {
+                var cm = CharacterManager.Instance;
+                if (cm?.Characters == null) return;
+                foreach (var ch in cm.Characters)
+                {
+                    if (ch == null || !ch.IsVisualLoaded) continue;
+                    var data = ch.Visual?.Data;
+                    if (data != null) data.IsTextureDirty = true;
+                }
+            }
+            catch (Exception e) { Log.LogWarning("[recolor] mark dirty failed: " + e.Message); }
+        }
+
         // Are our injected items still in the catalog? (They get wiped on mod reload.)
         private static bool OurItemsPresent(Equipment eq)
         {
@@ -626,6 +654,11 @@ namespace InkAnywhere
 
                 // Fully rebuild the catalog UI over the next moment.
                 RequestRefresh();
+
+                // If we just (re)added items, re-render loaded characters so a worn tattoo
+                // shows immediately — e.g. right after loading a save — instead of only
+                // after opening the Paramaker.
+                if (newlyAdded > 0) MarkLoadedCharactersDirty();
 
                 if (DevMode) _devInjectedNew += newlyAdded;
                 DevEvent($"inject done loaded={_loaded} new={newlyAdded} failed={_failures.Count}");
