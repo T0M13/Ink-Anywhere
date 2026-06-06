@@ -72,6 +72,8 @@ namespace InkAnywhere
 
         // Fixed GUID for our special "+ Add tattoo" catalog tile.
         public const ulong AddButtonGuid = 0xADDA7700ADDA7700UL;
+        private static readonly bool DevMode = true;
+        private const int DevEventLimit = 10;
 
         private void Awake() => Instance = this;
 
@@ -89,26 +91,58 @@ namespace InkAnywhere
         // Set by the catalog hook (OnCatalogRefreshing); means "we're in the Paramaker now".
         private UICharacterCreatorContextualList _activeList;
         private float _lastCatalogActive;
+        private float _nextPresenceCheck;
 
-        // Deferred catalog rebuild: we rebuild repeatedly for a short window so newly
-        // added thumbnails (whose sprite isn't ready the first frame) catch up —
-        // this is what manually reopening the section was doing.
-        private float _refreshUntil;
-        private float _nextRefreshTick;
+        // Deferred catalog rebuild: one rebuild next frame after an add/delete.
+        private bool _rebuildPending;
 
         // Watchdog: the game keeps unloading our texture and its own reload returns
         // null, which NREs the skin compositor. We track each texture GUID -> source
         // PNG path and re-load it ourselves whenever the asset's texture goes null.
         private static readonly FieldInfo TexField =
             typeof(AssetTexture).GetField("_texture", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo SpriteField =
+            typeof(AssetTexture).GetField("_sprite", BindingFlags.NonPublic | BindingFlags.Instance);
         private readonly Dictionary<ulong, string> _texPaths = new Dictionary<ulong, string>();
+        private readonly List<string> _devEvents = new List<string>();
+
+        // Recolor uses native GrayMask for colours, but #000 reads as dark grey through that
+        // shader. So when a decal's swatch is (near) black we swap in a pure-black, verbatim
+        // texture (built once per tattoo, cached) for true #000. Colours still use GrayMask.
+        private readonly HashSet<ulong> _recolorTexGuids = new HashSet<ulong>();
+        private readonly Dictionary<ulong, Texture2D> _blackTextures = new Dictionary<ulong, Texture2D>();
+
+        private float _devFps;
+        private float _devFrameMs;
+        private float _devWorstFrameMs;
+        private float _devLowestFps;
+        private int _devCatalogHooks;
+        private int _devTattooSectionHooks;
+        private int _devRefreshRequests;
+        private int _devRefreshTicks;
+        private int _devRefreshErrors;
+        private int _devInjectCalls;
+        private int _devInjectedNew;
+        private int _devTextureChecks;
+        private int _devTextureReloads;
+        private int _devAddTileClicks;
+        private int _devPickerStarts;
+        private int _devPickerCancels;
+        private int _devPickerImports;
+        private int _devTilesDecorated;
+        private int _devDeleteButtonsShown;
+        private int _devDeleteRequests;
+        private bool _devLastTattooSection;
 
         private void Update()
         {
+            if (DevMode) UpdateDevFrameStats();
+
             if (!_updateSeen)
             {
                 _updateSeen = true;
                 Log.LogInfo("Runner.Update is ticking!");
+                DevEvent("runner update ticking");
             }
 
             // Everything else only matters in the Paramaker. The catalog hook
@@ -127,10 +161,11 @@ namespace InkAnywhere
                     EnsureTexture(guid);
             }
 
-            // Apply requested catalog rebuilds here (after add/delete; not mid-click).
-            if (Time.unscaledTime < _refreshUntil && Time.unscaledTime >= _nextRefreshTick)
+            // Apply a requested catalog rebuild here (not mid-click). Our textures are
+            // protected + pre-warmed, so one rebuild is enough.
+            if (_rebuildPending)
             {
-                _nextRefreshTick = Time.unscaledTime + 0.2f;
+                _rebuildPending = false;
                 RefreshCatalog();
             }
         }
@@ -143,11 +178,27 @@ namespace InkAnywhere
             _activeList = list;
             _lastCatalogActive = Time.unscaledTime;
             _inTattooSection = list != null && list.UIDecalPositions != null;
+            if (DevMode)
+            {
+                _devCatalogHooks++;
+                if (_inTattooSection) _devTattooSectionHooks++;
+                if (_devLastTattooSection != _inTattooSection)
+                {
+                    _devLastTattooSection = _inTattooSection;
+                    DevEvent(_inTattooSection ? "tattoo section active" : "tattoo section inactive");
+                }
+            }
+
+            // This hook fires every frame the catalog updates — keep it nearly free.
+            // The "are our items still here?" scan only needs to run a couple times a sec.
+            if (Time.unscaledTime < _nextPresenceCheck) return;
+            _nextPresenceCheck = Time.unscaledTime + 0.5f;
 
             var eq = Settings.Get<Equipment>();
             if (eq?.EquipmentItems == null || eq.EquipmentItems.Length == 0) return;
             if (!OurItemsPresent(eq))
             {
+                DevEvent("catalog items missing, injecting");
                 Inject();
                 // Force this same refresh to rebuild now that our items are back.
                 if (list != null)
@@ -157,18 +208,27 @@ namespace InkAnywhere
             }
         }
 
-        // Ask for the catalog to be rebuilt over the next ~1.2s (covers thumbnail load).
-        private void RequestRefresh() => _refreshUntil = Time.unscaledTime + 1.2f;
+        // Ask for a couple of catalog rebuilds (sprites are already pre-warmed, so this
+        // just needs to redraw once or twice — not spam rebuilds).
+        private void RequestRefresh()
+        {
+            _rebuildPending = true;
+            if (DevMode) _devRefreshRequests++;
+            DevEvent("refresh requested");
+        }
 
         // Force the tattoo catalog to fully rebuild now (like closing + reopening it).
         private void RefreshCatalog()
         {
+            if (DevMode) _devRefreshTicks++;
             var list = _activeList;
             if (list == null) return;
 
-            // Pre-create our icon sprites so tiles (incl. the "+") never build blank.
+            // Load our textures (with keep-alive flags) BEFORE the rebuild reads their
+            // sprites — otherwise the game logs "Texture is null" and tiles build blank.
             foreach (var guid in _texPaths.Keys)
             {
+                EnsureTexture(guid);
                 try { var _ = AssetManager.Instance.GetSprite(guid); } catch { /* not ready yet */ }
             }
 
@@ -179,17 +239,27 @@ namespace InkAnywhere
                     ?.SetValue(list, 0uL);
                 list.RefreshListContent();
             }
-            catch (Exception e) { Log.LogError("[refresh] " + e); }
+            catch (Exception e)
+            {
+                if (DevMode) _devRefreshErrors++;
+                DevEvent("refresh error: " + e.Message);
+                Log.LogError("[refresh] " + e);
+            }
         }
 
         // Reload our PNG into the asset whenever its texture is missing/destroyed.
         private void EnsureTexture(ulong texGuid)
         {
+            if (DevMode) _devTextureChecks++;
             var asset = AssetManager.Instance.GetAssetOfType<AssetTexture>(texGuid);
             if (asset == null || TexField == null) return;
 
             var current = TexField.GetValue(asset) as Texture2D;
-            if (current != null) return; // still valid, nothing to do
+            // Keep "ours" = a texture WE loaded with HideAndDontSave, which Unity's
+            // UnloadUnusedAssets won't destroy. If it's missing, or it's a game-loaded
+            // copy (hideFlags None — those get unloaded and leave a blank tile), reload
+            // our protected copy.
+            if (current != null && current.hideFlags != HideFlags.None) return;
 
             if (!_texPaths.TryGetValue(texGuid, out var path) || !File.Exists(path)) return;
 
@@ -204,11 +274,11 @@ namespace InkAnywhere
             asset.GenerateTextureQualities = GenerateTextureQualityTypes.No;
             asset.IsCropped = false;
             TexField.SetValue(asset, tex);
+            SpriteField?.SetValue(asset, null); // regenerate the sprite from the new texture
             asset.IsLoaded = true;
+            if (DevMode) _devTextureReloads++;
+            DevEvent("texture reloaded: " + Path.GetFileName(path));
         }
-
-        // Flip to true to bring back the in-game debug panel (status + failures + buttons).
-        private static readonly bool ShowDebugUI = false;
 
         private void OnGUI()
         {
@@ -221,7 +291,7 @@ namespace InkAnywhere
                     PickAndAddPng();
             }
 
-            if (!ShowDebugUI) return;
+            if (!DevMode) return;
 
             // Collapsed: a small button in the corner to reopen the panel.
             if (!_panelOpen)
@@ -232,10 +302,10 @@ namespace InkAnywhere
             }
 
             bool hasErrors = _failures.Count > 0;
-            float h = 92 + (hasErrors ? Mathf.Min(_failures.Count, 6) * 20 + 24 : 0);
-            GUI.Box(new Rect(10, 10, 380, h), "Ink Anywhere");
+            float h = 430 + (hasErrors ? Mathf.Min(_failures.Count, 6) * 20 + 24 : 0);
+            GUI.Box(new Rect(10, 10, 520, h), "Ink Anywhere Dev");
 
-            GUI.Label(new Rect(20, 34, 360, 22),
+            GUI.Label(new Rect(20, 34, 490, 22),
                 hasErrors
                     ? $"{_loaded} tattoo(s) loaded — {_failures.Count} could not be added:"
                     : $"{_loaded} custom tattoo(s) loaded.");
@@ -259,12 +329,103 @@ namespace InkAnywhere
                 y += 4;
             }
 
-            if (GUI.Button(new Rect(20, y, 120, 28), "Refresh"))
+            DrawDevDiagnostics(ref y);
+            y += 4;
+
+            if (GUI.Button(new Rect(20, y, 120, 28), "Inject"))
                 Inject();
-            if (GUI.Button(new Rect(148, y, 130, 28), "Open folder"))
+            if (GUI.Button(new Rect(148, y, 120, 28), "Rebuild UI"))
+                RefreshCatalog();
+            if (GUI.Button(new Rect(276, y, 104, 28), "Open folder"))
                 Application.OpenURL("file://" + Plugin.TattooFolder);
-            if (GUI.Button(new Rect(286, y, 84, 28), "Hide"))
+            if (GUI.Button(new Rect(388, y, 58, 28), "Reset"))
+                ResetDevStats();
+            if (GUI.Button(new Rect(454, y, 58, 28), "Hide"))
                 _panelOpen = false;
+        }
+
+        private void DrawDevDiagnostics(ref float y)
+        {
+            bool catalogActive = Time.unscaledTime - _lastCatalogActive < 1.5f;
+            var eq = Settings.Get<Equipment>();
+            int catalogItems = eq?.EquipmentItems?.Length ?? 0;
+            int customItems = CountCustomItems(eq);
+            bool plusPresent = eq?.EquipmentItems != null &&
+                               eq.EquipmentItems.Any(e => e != null && e.GUID == AddButtonGuid);
+
+            DevLine(ref y, $"FPS avg {_devFps:0.0} | frame {_devFrameMs:0.0} ms | worst {_devWorstFrameMs:0.0} ms | low {_devLowestFps:0.0} fps");
+            DevLine(ref y, $"State catalog={catalogActive} tattoo={_inTattooSection} harmony={HarmonyOk} plus={plusPresent}");
+            DevLine(ref y, $"Catalog items={catalogItems} custom={customItems} loaded={_loaded} failures={_failures.Count}");
+            DevLine(ref y, $"Hooks catalog={_devCatalogHooks} tattoo={_devTattooSectionHooks} inject={_devInjectCalls} new={_devInjectedNew}");
+            DevLine(ref y, $"Refresh requested={_devRefreshRequests} ticks={_devRefreshTicks} errors={_devRefreshErrors}");
+            DevLine(ref y, $"Textures tracked={_texPaths.Count} checks={_devTextureChecks} reloads={_devTextureReloads}");
+            DevLine(ref y, "Recolor: native GrayMask (white mask + per-instance swatch)");
+            DevLine(ref y, $"UI addClicks={_devAddTileClicks} picker={_devPickerStarts}/{_devPickerImports}/{_devPickerCancels} tiles={_devTilesDecorated} deleteBtns={_devDeleteButtonsShown} deletes={_devDeleteRequests}");
+
+            if (_devEvents.Count == 0) return;
+            y += 4;
+            DevLine(ref y, "Recent:");
+            foreach (var evt in _devEvents)
+                DevLine(ref y, "- " + evt);
+        }
+
+        private static void DevLine(ref float y, string text)
+        {
+            GUI.Label(new Rect(20, y, 500, 20), text);
+            y += 18f;
+        }
+
+        private void UpdateDevFrameStats()
+        {
+            float dt = Time.unscaledDeltaTime;
+            if (dt <= 0f) return;
+
+            _devFrameMs = dt * 1000f;
+            float fps = 1f / dt;
+            _devFps = _devFps <= 0f ? fps : Mathf.Lerp(_devFps, fps, 0.08f);
+            _devLowestFps = _devLowestFps <= 0f ? fps : Mathf.Min(_devLowestFps, fps);
+            _devWorstFrameMs = Mathf.Max(_devWorstFrameMs, _devFrameMs);
+        }
+
+        private void ResetDevStats()
+        {
+            _devFps = 0f;
+            _devFrameMs = 0f;
+            _devWorstFrameMs = 0f;
+            _devLowestFps = 0f;
+            _devCatalogHooks = 0;
+            _devTattooSectionHooks = 0;
+            _devRefreshRequests = 0;
+            _devRefreshTicks = 0;
+            _devRefreshErrors = 0;
+            _devInjectCalls = 0;
+            _devInjectedNew = 0;
+            _devTextureChecks = 0;
+            _devTextureReloads = 0;
+            _devAddTileClicks = 0;
+            _devPickerStarts = 0;
+            _devPickerCancels = 0;
+            _devPickerImports = 0;
+            _devTilesDecorated = 0;
+            _devDeleteButtonsShown = 0;
+            _devDeleteRequests = 0;
+            _devEvents.Clear();
+            DevEvent("stats reset");
+        }
+
+        private void DevEvent(string message)
+        {
+            if (!DevMode) return;
+
+            _devEvents.Insert(0, $"{Time.realtimeSinceStartup:0.0}s {message}");
+            if (_devEvents.Count > DevEventLimit)
+                _devEvents.RemoveAt(_devEvents.Count - 1);
+        }
+
+        private static int CountCustomItems(Equipment eq)
+        {
+            return eq?.EquipmentItems?.Count(e => e != null && e.DisplayName != null &&
+                                                  e.DisplayName.StartsWith("Ink: ")) ?? 0;
         }
 
         // Are our injected items still in the catalog? (They get wiped on mod reload.)
@@ -281,11 +442,17 @@ namespace InkAnywhere
         {
             try
             {
+                if (DevMode) _devInjectCalls++;
+                DevEvent("inject start");
+
                 var eq = Settings.Get<Equipment>();
                 if (eq?.EquipmentItems == null) return;
 
                 // Template = an existing tattoo we clone (reuses its tags/swatch/decal sections).
-                var template = eq.EquipmentItems.FirstOrDefault(e => e != null && e.IsDecal);
+                // Prefer a real "Tattoo" so recolorable items inherit the tattoo swatch palette.
+                var template = eq.EquipmentItems.FirstOrDefault(e =>
+                                   e != null && e.IsDecal && e.DisplayName != null && e.DisplayName.StartsWith("Tattoo"))
+                               ?? eq.EquipmentItems.FirstOrDefault(e => e != null && e.IsDecal);
                 if (template == null) return;
 
                 // Allow much smaller/larger tattoo scaling than the default 0.25–1.5.
@@ -305,42 +472,54 @@ namespace InkAnywhere
                 foreach (var path in Directory.GetFiles(Plugin.TattooFolder, "*.png"))
                 {
                     string name = Path.GetFileNameWithoutExtension(path);
+                    ulong equipGuid = Hash(name + "|equip");
+
+                    // Skip anything already in the catalog BEFORE any decoding — keeps
+                    // re-injects/refreshes cheap (only brand-new files do heavy work).
+                    if (eq.EquipmentItems.Any(e => e != null && e.GUID == equipGuid)) { _loaded++; continue; }
+
                     try
                     {
-                        // Validate the image actually decodes before doing anything.
+                        // Validate + decide recolorable (grayscale/single-hue) vs full-color.
                         var probe = new Texture2D(2, 2, TextureFormat.ARGB32, false);
                         bool ok = probe.LoadImage(File.ReadAllBytes(path)) && probe.width > 2 && probe.height > 2;
+                        bool recolor = ok && !IsColorful(probe);
                         UnityEngine.Object.Destroy(probe);
                         if (!ok) { _failures.Add(name + " — not a valid image"); continue; }
 
                         ulong texGuid = Hash(name + "|tex");
-                        ulong equipGuid = Hash(name + "|equip");
                         ulong iconGuid = Hash(name + "|icon");
 
-                        if (eq.EquipmentItems.Any(e => e != null && e.GUID == equipGuid)) { _loaded++; continue; }
-
-                        // Texture (kept alive by the watchdog).
+                        // On-body texture. Colorful = the original PNG (NonRecolorable, shown
+                        // as-is). Recolorable = a generated WHITE mask + GrayMask shader, so the
+                        // game tints it per-decal from the swatch — native, GPU, per-instance,
+                        // and saved with the character. (No runtime repainting.)
+                        string texSource = recolor ? Path.Combine(iconDir, name + ".mask.png") : path;
                         if (AssetManager.Instance.GetAssetOfType<AssetTexture>(texGuid) == null)
                         {
-                            var asset = AssetManager.Instance.RegisterAsset(path, texGuid, false, 0uL) as AssetTexture;
+                            if (recolor && !File.Exists(texSource)) MakeRecolorMask(path, texSource);
+                            var asset = AssetManager.Instance.RegisterAsset(texSource, texGuid, false, 0uL) as AssetTexture;
                             if (asset == null) { _failures.Add(name + " — texture register failed"); continue; }
                             asset.IsClampTextureWrapMode = true;
                         }
-                        _texPaths[texGuid] = path;
+                        _texPaths[texGuid] = texSource;
                         EnsureTexture(texGuid);
+                        if (recolor) _recolorTexGuids.Add(texGuid);
 
                         // Tidy square thumbnail (built once per session; survives re-injects).
                         string iconPath = Path.Combine(iconDir, name + ".png");
                         if (AssetManager.Instance.GetAssetOfType<AssetTexture>(iconGuid) == null)
                         {
-                            MakeSquareIcon(path, iconPath);
+                            if (!File.Exists(iconPath)) MakeSquareIcon(path, iconPath);
                             var ia = AssetManager.Instance.RegisterAsset(iconPath, iconGuid, false, 0uL) as AssetTexture;
                             if (ia != null) ia.IsClampTextureWrapMode = true;
                         }
                         _texPaths[iconGuid] = iconPath;
                         EnsureTexture(iconGuid);
+                        // Create the sprite now so the tile never builds blank.
+                        try { var _ = AssetManager.Instance.GetSprite(iconGuid); } catch { }
 
-                        // Clone a real tattoo and repoint it at our texture, full-color.
+                        // Clone a real tattoo and repoint it at our texture.
                         var item = ShallowClone(template);
                         item.GUID = equipGuid;
                         item.DisplayName = "Ink: " + name;
@@ -351,8 +530,23 @@ namespace InkAnywhere
                             var et = ShallowClone(template.Textures[0]);
                             et.TextureGUID = texGuid;
                             et.MaskTextureGUID = 0uL;
-                            et.ShaderType = ShaderType.NonRecolorable;
+                            // Recolorable: GrayMask tints the white mask by the per-instance
+                            // swatch colour (native, GPU). Colorful: NonRecolorable = original.
+                            et.ShaderType = recolor ? ShaderType.GrayMask : ShaderType.NonRecolorable;
                             item.Textures = new[] { et };
+                        }
+
+                        // Recolorable tattoos default to black (still recolorable via swatches),
+                        // so a black design stays black unless the player picks another color.
+                        // Full opacity by default so black can be truly black (the game otherwise
+                        // attenuates tattoo opacity, blending skin through = never pure black).
+                        if (recolor)
+                        {
+                            ulong black = EnsureBlackSwatch(item.SwatchGroup);
+                            if (black != 0uL) item.DefaultSwatch = black;
+                            item.CanChangeOpacity = true;
+                            item.DefaultOpacity = 1f;
+                            item.OpacityAttenuationRatio = 1f;
                         }
 
                         eq.EquipmentItems = eq.EquipmentItems.Concat(new[] { item }).ToArray();
@@ -395,9 +589,15 @@ namespace InkAnywhere
                 // Fully rebuild the catalog UI over the next moment.
                 RequestRefresh();
 
+                if (DevMode) _devInjectedNew += newlyAdded;
+                DevEvent($"inject done loaded={_loaded} new={newlyAdded} failed={_failures.Count}");
                 Log.LogInfo($"[inject] done: loaded={_loaded}, new={newlyAdded}, failed={_failures.Count}");
             }
-            catch (Exception e) { Log.LogError("[inject] fatal " + e); }
+            catch (Exception e)
+            {
+                DevEvent("inject fatal: " + e.Message);
+                Log.LogError("[inject] fatal " + e);
+            }
         }
 
         // Make a clean square thumbnail: the image fit + centered on transparency.
@@ -434,6 +634,107 @@ namespace InkAnywhere
             UnityEngine.Object.Destroy(icon);
         }
 
+        // Build a white mask for the GrayMask shader: RGB = white, alpha = how "inked"
+        // each pixel is. The game then tints white by the swatch colour per decal
+        // (white x colour = colour). Generated once and cached to disk.
+        private static void MakeRecolorMask(string srcPath, string outPath)
+        {
+            var src = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+            src.LoadImage(File.ReadAllBytes(srcPath));
+            var px = src.GetPixels32();
+
+            // If the image relies on transparency, use alpha as coverage; if it's an opaque
+            // image, use darkness (1 - luminance) so dark designs become the inked area.
+            int transparent = 0;
+            for (int i = 0; i < px.Length; i++) if (px[i].a < 250) transparent++;
+            bool hasTransparency = transparent > px.Length * 0.02f;
+
+            for (int i = 0; i < px.Length; i++)
+            {
+                var c = px[i];
+                int a;
+                if (c.a == 0) a = 0;
+                else if (hasTransparency) a = c.a;
+                else
+                {
+                    float lum = (0.299f * c.r + 0.587f * c.g + 0.114f * c.b) / 255f;
+                    a = Mathf.Clamp(Mathf.RoundToInt(c.a * (1f - lum)), 0, 255);
+                }
+                px[i] = new Color32(255, 255, 255, (byte)a);
+            }
+
+            src.SetPixels32(px);
+            src.Apply();
+            File.WriteAllBytes(outPath, src.EncodeToPNG());
+            UnityEngine.Object.Destroy(src);
+        }
+
+        // For each of OUR recolor decals whose chosen swatch is (near) #000, swap GrayMask
+        // for a pure-black verbatim texture so true black is actually black. Colours are
+        // left on GrayMask. The black texture is built once per tattoo and cached — no churn.
+        internal void ApplyBlackOverride(SkinLayer[] layers)
+        {
+            if (layers == null || _recolorTexGuids.Count == 0) return;
+
+            for (int i = 0; i < layers.Length; i++)
+            {
+                var layer = layers[i];
+                if (layer.Texture == null || layer.TextureType != TextureType.Albedo) continue;
+                if (layer.ShaderType != ShaderType.GrayMask) continue;
+                if (!IsNearBlack(layer.Colors)) continue;
+
+                ulong texGuid = FindRecolorTexGuid(layer.Texture);
+                if (texGuid == 0uL) continue;
+
+                var black = GetBlackTexture(texGuid, layer.Texture);
+                if (black == null) continue;
+
+                layer.Texture = black;
+                layer.ShaderType = ShaderType.NonRecolorable;
+                layer.MaskTexture = 0uL;
+                layer.Opacity = 1f;
+                layers[i] = layer;
+            }
+        }
+
+        private ulong FindRecolorTexGuid(Texture2D tex)
+        {
+            foreach (var g in _recolorTexGuids)
+            {
+                var a = AssetManager.Instance.GetAssetOfType<AssetTexture>(g);
+                if (a != null && a.Texture == tex) return g;
+            }
+            return 0uL;
+        }
+
+        private Texture2D GetBlackTexture(ulong texGuid, Texture2D maskTex)
+        {
+            if (_blackTextures.TryGetValue(texGuid, out var existing) && existing != null) return existing;
+            if (maskTex == null) return null;
+
+            Color32[] px;
+            try { px = maskTex.GetPixels32(); } catch { return null; }
+            for (int i = 0; i < px.Length; i++) px[i] = new Color32(0, 0, 0, px[i].a); // black, keep coverage
+
+            var black = new Texture2D(maskTex.width, maskTex.height, TextureFormat.ARGB32, false)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            black.SetPixels32(px);
+            black.Apply(false, false);
+            _blackTextures[texGuid] = black;
+            return black;
+        }
+
+        private static bool IsNearBlack(Color[] colors)
+        {
+            if (colors == null || colors.Length == 0) return false;
+            var c = colors[0];
+            return c.r < 0.04f && c.g < 0.04f && c.b < 0.04f;
+        }
+
         // Draw a simple "+" tile icon (a plus on a light background).
         private static void MakePlusIcon(string outPath, int size = 256)
         {
@@ -458,21 +759,40 @@ namespace InkAnywhere
         }
 
         // Open a PNG file picker, copy the chosen file into the folder, and inject it.
+        internal void RecordAddTileClick()
+        {
+            if (DevMode) _devAddTileClicks++;
+            DevEvent("add tile clicked");
+        }
+
         internal void PickAndAddPng()
         {
             try
             {
+                if (DevMode) _devPickerStarts++;
+                DevEvent("picker open");
                 string file = OpenPngDialog();
-                if (string.IsNullOrEmpty(file) || !File.Exists(file)) return;
+                if (string.IsNullOrEmpty(file) || !File.Exists(file))
+                {
+                    if (DevMode) _devPickerCancels++;
+                    DevEvent("picker canceled");
+                    return;
+                }
 
                 string dest = Path.Combine(Plugin.TattooFolder, Path.GetFileName(file));
                 if (!string.Equals(Path.GetFullPath(file), Path.GetFullPath(dest), StringComparison.OrdinalIgnoreCase))
                     File.Copy(file, dest, true);
 
                 Inject();
+                if (DevMode) _devPickerImports++;
+                DevEvent("imported " + Path.GetFileName(file));
                 Log.LogInfo("[add] imported " + Path.GetFileName(file));
             }
-            catch (Exception e) { Log.LogError("[add] " + e); }
+            catch (Exception e)
+            {
+                DevEvent("add error: " + e.Message);
+                Log.LogError("[add] " + e);
+            }
         }
 
         // ---- In-grid delete: add a small "x" to our custom tattoo tiles ----
@@ -483,6 +803,7 @@ namespace InkAnywhere
             if (tile == null) return;
             bool ours = equipment != null && equipment.DisplayName != null &&
                         equipment.DisplayName.StartsWith("Ink: ");
+            if (DevMode && ours) _devTilesDecorated++;
 
             var existing = tile.transform.Find("InkDeleteBtn");
             if (!ours)
@@ -493,6 +814,7 @@ namespace InkAnywhere
 
             var go = existing != null ? existing.gameObject : CreateDeleteButton(tile.transform);
             go.SetActive(true);
+            if (DevMode) _devDeleteButtonsShown++;
 
             string name = equipment.DisplayName.Substring("Ink: ".Length);
             var btn = go.GetComponent<Button>();
@@ -565,6 +887,8 @@ namespace InkAnywhere
         {
             try
             {
+                if (DevMode) _devDeleteRequests++;
+                DevEvent("delete requested " + name);
                 UI.Get<UIPrompt>().ShowYesNo(
                     "Delete custom tattoo",
                     $"Delete \"{name}\" and remove its PNG file? This cannot be undone.",
@@ -605,16 +929,26 @@ namespace InkAnywhere
                         BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(eq, null);
                 }
 
-                // Stop tracking + delete the source files.
+                // Stop tracking + delete the source files (incl. the generated mask).
                 _texPaths.Remove(texGuid);
                 _texPaths.Remove(iconGuid);
+                _recolorTexGuids.Remove(texGuid);
+                if (_blackTextures.TryGetValue(texGuid, out var blk) && blk != null)
+                    UnityEngine.Object.Destroy(blk);
+                _blackTextures.Remove(texGuid);
                 TryDelete(Path.Combine(Plugin.TattooFolder, name + ".png"));
                 TryDelete(Path.Combine(Plugin.TattooFolder, "_icons", name + ".png"));
+                TryDelete(Path.Combine(Plugin.TattooFolder, "_icons", name + ".mask.png"));
 
                 RequestRefresh();
+                DevEvent("deleted " + name);
                 Log.LogInfo("[delete] removed " + name);
             }
-            catch (Exception e) { Log.LogError("[delete] " + e); }
+            catch (Exception e)
+            {
+                DevEvent("delete error: " + e.Message);
+                Log.LogError("[delete] " + e);
+            }
         }
 
         private static void TryDelete(string path)
@@ -670,6 +1004,70 @@ namespace InkAnywhere
             return GetOpenFileNameW(ref ofn) ? ofn.lpstrFile.TrimEnd('\0') : null;
         }
 
+        // Ensure a pure-black swatch exists in the tattoo group (the vanilla palette's
+        // darkest is only a dark gray). Injected once per group; returns its GUID.
+        private static ulong EnsureBlackSwatch(ulong group)
+        {
+            if (group == 0uL) return 0uL;
+            var settings = SwatchManager.SwatchSettings;
+            if (settings?.AllSwatches == null) return 0uL;
+
+            ulong guid = Hash("__ink_black_swatch__" + group);
+            if (settings.AllSwatches.Any(s => s != null && s.GUID == guid)) return guid;
+
+            var tmpl = settings.AllSwatches.FirstOrDefault(s => s != null && s.SwatchGroup == group);
+            if (tmpl == null) return 0uL;
+
+            var black = ShallowClone(tmpl);
+            black.GUID = guid;
+            // Deep-copy the colors so we don't recolor the template, then force black.
+            if (tmpl.SwatchColors != null && tmpl.SwatchColors.Length > 0)
+                black.SwatchColors = tmpl.SwatchColors
+                    .Select(sc => { var n = ShallowClone(sc); n.PaletteColor = 0uL; n.Color = Color.black; return n; })
+                    .ToArray();
+            else
+                black.SwatchColors = new[] { new SwatchColor { Color = Color.black } };
+
+            settings.AllSwatches = settings.AllSwatches.Concat(new[] { black }).ToArray();
+            Log.LogInfo("[recolor] injected pure-black swatch for group " + group);
+            return guid;
+        }
+
+        // Heuristic: does the image have multiple distinct hues (true color) → keep locked,
+        // vs grayscale / single-hue → recolorable via the swatch UI?
+        private static bool IsColorful(Texture2D tex)
+        {
+            Color32[] px;
+            try { px = tex.GetPixels32(); }
+            catch { return true; } // unreadable → safe default = locked full-color (current behavior)
+
+            int step = Mathf.Max(1, px.Length / 4096); // sample up to ~4k pixels
+            int opaque = 0, saturated = 0;
+            var hueBins = new int[12];
+            for (int i = 0; i < px.Length; i += step)
+            {
+                var c = px[i];
+                if (c.a < 25) continue;
+                opaque++;
+                float r = c.r / 255f, g = c.g / 255f, b = c.b / 255f;
+                float max = Mathf.Max(r, Mathf.Max(g, b));
+                float min = Mathf.Min(r, Mathf.Min(g, b));
+                float sat = max <= 0.0001f ? 0f : (max - min) / max;
+                if (sat < 0.18f) continue; // near-gray pixel
+                saturated++;
+                Color.RGBToHSV(new Color(r, g, b), out float hue, out _, out _);
+                hueBins[Mathf.Clamp((int)(hue * 12f), 0, 11)]++;
+            }
+
+            if (opaque == 0) return false;
+            if ((float)saturated / opaque < 0.12f) return false; // mostly grayscale → recolorable
+
+            int significantHues = 0;
+            foreach (var count in hueBins)
+                if (count > saturated * 0.10f) significantHues++;
+            return significantHues > 1; // many hues → colorful; single hue → recolorable
+        }
+
         // Stable 64-bit FNV-1a hash so the same file keeps the same GUID across runs.
         private static ulong Hash(string s)
         {
@@ -699,6 +1097,7 @@ namespace InkAnywhere
             if (__instance != null && __instance.Equipment != null &&
                 __instance.Equipment.GUID == Runner.AddButtonGuid)
             {
+                Runner.Instance?.RecordAddTileClick();
                 Runner.Instance?.PickAndAddPng();
                 return false; // skip the normal equip behaviour
             }
@@ -726,6 +1125,17 @@ namespace InkAnywhere
         private static void Prefix(UICharacterCreatorContextualList __instance)
         {
             Runner.Instance?.OnCatalogRefreshing(__instance);
+        }
+    }
+
+    // Lightweight: just before the skin is composited, force true #000 black on our recolor
+    // decals whose swatch is black (GrayMask alone can't reach pure black).
+    [HarmonyPatch(typeof(SkinLayeringManager), "RequestSkinRender")]
+    internal static class BlackOverridePatch
+    {
+        private static void Prefix(SkinLayer[] skinLayers)
+        {
+            Runner.Instance?.ApplyBlackOverride(skinLayers);
         }
     }
 }
