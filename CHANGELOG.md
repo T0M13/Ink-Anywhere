@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 Beta - 2026-06-06
+
+### Added
+
+- **Recolorable tattoos.** Tattoos that are one colour / a few shades can now be recoloured
+  with the game's native colour swatches, per placement (each decal keeps its own colour).
+  Colourful images stay full-colour. Pure **#000 black** is supported.
+- **Delete tattoos in-game** via a small "x" on each custom tile (with a confirmation), which
+  also deletes the PNG.
+
+### Changed / Performance
+
+- **Fixes the background slowdown.** All work is now event-driven and only runs while you're
+  in character customization — nothing per-frame during normal play.
+- Recolouring uses the native GrayMask shader (GPU, per-instance) instead of CPU repainting,
+  so there's no frame drop when changing colours and no texture glitches.
+- Filtered out the harmless "Texture is null" log spam the game emits while rebuilding the
+  catalog (it was costing FPS to log).
+- Thumbnails composited on a light background so dark tattoos are visible; catalog refreshes
+  reliably after add/delete.
+
 ## 0.2.2 Beta (experimental) - 2026-06-05
 
 Performance + reliability rework. Experimental — 0.2.1 remains the stable release.

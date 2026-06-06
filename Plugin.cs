@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.2.2")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -54,11 +54,49 @@ namespace InkAnywhere
                     Runner.HarmonyOk = false;
                     Log.LogWarning("Harmony unavailable, using fallback button: " + he.Message);
                 }
+
+                // The game logs harmless "Texture is null for asset ..." errors while the
+                // tattoo catalog rebuilds (our own + other mods' textures briefly unload).
+                // It's cosmetic but logging it hundreds of times costs FPS, so we drop just
+                // that message and pass everything else through untouched.
+                try
+                {
+                    if (!(Debug.unityLogger.logHandler is InkLogFilter))
+                        Debug.unityLogger.logHandler = new InkLogFilter(Debug.unityLogger.logHandler);
+                }
+                catch (Exception fe) { Log.LogWarning("log filter setup failed: " + fe.Message); }
             }
             catch (Exception e)
             {
                 Log.LogError("Awake failed: " + e);
             }
+        }
+    }
+
+    // Wraps Unity's log handler to drop the game's harmless "Texture is null for asset ..."
+    // spam (logged while the catalog rebuilds) while forwarding everything else.
+    internal sealed class InkLogFilter : UnityEngine.ILogHandler
+    {
+        private readonly UnityEngine.ILogHandler _inner;
+        public InkLogFilter(UnityEngine.ILogHandler inner) { _inner = inner; }
+
+        public void LogFormat(LogType logType, UnityEngine.Object context, string format, params object[] args)
+        {
+            if (logType == LogType.Error && IsTextureNullSpam(format, args)) return;
+            _inner.LogFormat(logType, context, format, args);
+        }
+
+        public void LogException(Exception exception, UnityEngine.Object context)
+            => _inner.LogException(exception, context);
+
+        private static bool IsTextureNullSpam(string format, object[] args)
+        {
+            const string needle = "Texture is null for asset";
+            if (format != null && format.IndexOf(needle, StringComparison.Ordinal) >= 0) return true;
+            if (args != null)
+                foreach (var a in args)
+                    if (a is string s && s.IndexOf(needle, StringComparison.Ordinal) >= 0) return true;
+            return false;
         }
     }
 
@@ -72,7 +110,7 @@ namespace InkAnywhere
 
         // Fixed GUID for our special "+ Add tattoo" catalog tile.
         public const ulong AddButtonGuid = 0xADDA7700ADDA7700UL;
-        private static readonly bool DevMode = true;
+        private static readonly bool DevMode = false;
         private const int DevEventLimit = 10;
 
         private void Awake() => Instance = this;
