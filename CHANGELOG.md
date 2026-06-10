@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 Beta - 2026-06-08
+
+### Fixed
+
+- **Custom tattoos disappearing on load (more robust fix).** 0.3.1 relied on a timer, which
+  still missed some setups (especially with Workshop mods). Now we hook the moment each
+  character's visual loads and inject + re-render right then — deterministic, no timing race.
+
 ## 0.3.1 Beta - 2026-06-06
 
 ### Fixed

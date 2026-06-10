@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace InkAnywhere
 {
-    [BepInPlugin(Guid, "Ink Anywhere", "0.3.1")]
+    [BepInPlugin(Guid, "Ink Anywhere", "0.3.2")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.tomi.paralives.inkanywhere";
@@ -473,6 +473,32 @@ namespace InkAnywhere
         {
             return eq?.EquipmentItems?.Count(e => e != null && e.DisplayName != null &&
                                                   e.DisplayName.StartsWith("Ink: ")) ?? 0;
+        }
+
+        // Deterministic load fix: fires (via Harmony) the moment each character's visual
+        // loads (e.g. opening a save). Ensures our tattoos are injected and forces that
+        // character to (re)render, so worn tattoos show immediately — no timer race, works
+        // even with Workshop mods reshuffling the catalog on load.
+        internal void OnCharacterVisualLoaded(ulong characterGUID)
+        {
+            try
+            {
+                var eq = Settings.Get<Equipment>();
+                if (eq?.EquipmentItems != null && eq.EquipmentItems.Length > 0 && !OurItemsPresent(eq))
+                {
+                    Inject(); // also re-renders all loaded characters
+                    return;
+                }
+                // Items already present — just make sure THIS character re-renders, and that
+                // our textures are loaded first so the composite isn't blank.
+                if (_texPaths.Count > 0)
+                    foreach (var guid in _texPaths.Keys) EnsureTexture(guid);
+
+                var ch = AssetManager.Instance.GetCharacter(characterGUID);
+                var data = (ch != null && ch.IsVisualLoaded) ? ch.Visual?.Data : null;
+                if (data != null) data.IsTextureDirty = true;
+            }
+            catch (Exception e) { Log.LogWarning("[load] " + e.Message); }
         }
 
         // Force loaded characters to recomposite their skin so a worn custom tattoo renders
@@ -1207,6 +1233,18 @@ namespace InkAnywhere
         private static void Prefix(SkinLayer[] skinLayers)
         {
             Runner.Instance?.ApplyBlackOverride(skinLayers);
+        }
+    }
+
+    // Deterministic load fix: when a character's visual loads (e.g. opening a save), make
+    // sure our tattoos are injected and that character re-renders — so worn tattoos show
+    // immediately instead of being blank until you open the Paramaker.
+    [HarmonyPatch(typeof(CharacterManager), "LoadCharacterVisual")]
+    internal static class CharacterLoadPatch
+    {
+        private static void Postfix(ulong characterGUID)
+        {
+            Runner.Instance?.OnCharacterVisualLoaded(characterGUID);
         }
     }
 }
